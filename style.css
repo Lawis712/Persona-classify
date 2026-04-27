@@ -141,6 +141,303 @@
     border-style: solid;
 }
 
+/* 未分组分隔线 */
+.pgm-ungrouped-separator {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0 6px 0;
+    color: var(--SmartThemeQuoteColor, #888);
+    font-size: 12px;
+}
+
+.pgm-ungrouped-separator::before,
+.pgm-ungrouped-separator::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--SmartThemeBorderColor, #444);
+}
+
+/* 右键菜单 */
+.pgm-context-menu {
+    position: fixed;
+    z-index: 99999;
+    background: var(--SmartThemeBlurTintColor, #2a2a2a);
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 8px;
+    padding: 4px 0;
+    min-width: 160px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    backdrop-filter: blur(10px);
+}
+
+.pgm-context-menu-item {
+    padding: 7px 14px;
+    font-size: 13px;
+    color: var(--SmartThemeBodyColor, #ccc);
+    cursor: pointer;
+    transition: background 0.1s;
+    white-space: nowrap;
+}
+
+.pgm-context-menu-item:hover {
+    background: rgba(255,255,255,0.1);
+}
+
+.pgm-context-menu-divider {
+    height: 1px;
+    background: var(--SmartThemeBorderColor, #444);
+    margin: 4px 0;
+}
+
+/* ---------- 位置2：底部快捷弹窗 ---------- */
+#pgm-quick-btn {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 35px;
+    height: 35px;
+    flex-shrink: 0;
+}
+
+#pgm-quick-btn img {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid var(--SmartThemeBorderColor, #555);
+    transition: border-color 0.15s;
+}
+
+#pgm-quick-btn:hover img {
+    border-color: var(--SmartThemeQuoteColor, #999);
+}
+
+#pgm-quick-popup {
+    display: none;
+    position: fixed;
+    bottom: 55px;
+    right: 10px;
+    left: auto;
+    max-width: 400px;
+    max-height: 60vh;
+    overflow-y: auto;
+    background: var(--SmartThemeBlurTintColor, #1a1a1a);
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 12px;
+    padding: 10px;
+    z-index: 10001;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.5);
+    backdrop-filter: blur(15px);
+}
+
+#pgm-quick-popup.visible {
+    display: block;
+}
+
+#pgm-quick-popup .pgm-quick-search {
+    width: 100%;
+    padding: 6px 10px;
+    margin-bottom: 8px;
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 8px;
+    background: rgba(0,0,0,0.3);
+    color: var(--SmartThemeBodyColor, #ccc);
+    font-size: 13px;
+    box-sizing: border-box;
+    outline: none;
+}
+
+#pgm-quick-popup .pgm-quick-search:focus {
+    border-color: var(--SmartThemeQuoteColor, #888);
+}
+
+.pgm-quick-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 2px;
+}
+
+.pgm-quick-avatar {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+    width: 56px;
+    transition: transform 0.1s;
+}
+
+.pgm-quick-avatar:hover {
+    transform: scale(1.1);
+}
+
+.pgm-quick-avatar img {
+    width: 45px;
+    height: 45px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid transparent;
+    transition: border-color 0.15s;
+}
+
+.pgm-quick-avatar.active img {
+    border-color: var(--SmartThemeQuoteColor, #888);
+    box-shadow: 0 0 8px rgba(255,255,255,0.2);
+}
+
+.pgm-quick-avatar:hover img {
+    border-color: var(--SmartThemeQuoteColor, #666);
+}
+
+.pgm-quick-avatar-name {
+    font-size: 10px;
+    color: var(--SmartThemeBodyColor, #ccc);
+    text-align: center;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.2;
+}
+
+#pgm-quick-popup .pgm-group-section {
+    margin-bottom: 6px;
+}
+
+#pgm-quick-popup .pgm-group-header {
+    padding: 5px 8px;
+}
+
+#pgm-quick-popup .pgm-group-name {
+    font-size: 12px;
+}
+
+#pgm-quick-popup .pgm-group-actions {
+    display: none;
+}
+
+#pgm-quick-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 10000;
+}
+
+#pgm-quick-overlay.visible {
+    display: block;
+}
+
+/* ---------- 拖拽相关 ---------- */
+.pgm-drag-over {
+    background: rgba(255,255,255,0.08) !important;
+    border-color: var(--SmartThemeQuoteColor, #888) !important;
+}
+
+.pgm-dragging {
+    opacity: 0.5;
+}
+
+/* ---------- 滚动条美化 ---------- */
+#pgm-quick-popup::-webkit-scrollbar {
+    width: 5px;
+}
+
+#pgm-quick-popup::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#pgm-quick-popup::-webkit-scrollbar-thumb {
+    background: var(--SmartThemeBorderColor, #555);
+    border-radius: 3px;
+}
+}
+
+.pgm-group-header:hover .pgm-group-actions {
+    opacity: 1;
+}
+
+.pgm-group-actions button {
+    background: none;
+    border: none;
+    color: var(--SmartThemeBodyColor, #ccc);
+    cursor: pointer;
+    padding: 2px 5px;
+    font-size: 12px;
+    border-radius: 4px;
+    line-height: 1;
+}
+
+.pgm-group-actions button:hover {
+    background: rgba(255,255,255,0.1);
+}
+
+.pgm-group-content {
+    max-height: 2000px;
+    overflow: hidden;
+    transition: max-height 0.3s ease, opacity 0.2s;
+    opacity: 1;
+}
+
+.pgm-group-content.collapsed {
+    max-height: 0;
+    opacity: 0;
+}
+
+/* ---------- 位置1：用户设定管理面板内的分组 ---------- */
+#pgm-panel-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 0;
+    flex-wrap: wrap;
+}
+
+#pgm-panel-controls .pgm-filter-btn {
+    padding: 4px 10px;
+    font-size: 12px;
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 12px;
+    background: transparent;
+    color: var(--SmartThemeBodyColor, #ccc);
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+
+#pgm-panel-controls .pgm-filter-btn:hover {
+    background: rgba(255,255,255,0.08);
+}
+
+#pgm-panel-controls .pgm-filter-btn.active {
+    background: var(--SmartThemeQuoteColor, #555);
+    color: var(--SmartThemeBodyColor, #fff);
+    border-color: var(--SmartThemeQuoteColor, #555);
+}
+
+#pgm-add-group-btn {
+    padding: 4px 10px;
+    font-size: 12px;
+    border: 1px dashed var(--SmartThemeBorderColor, #555);
+    border-radius: 12px;
+    background: transparent;
+    color: var(--SmartThemeBodyColor, #ccc);
+    cursor: pointer;
+    transition: all 0.15s;
+    margin-left: auto;
+}
+
+#pgm-add-group-btn:hover {
+    background: rgba(255,255,255,0.08);
+    border-style: solid;
+}
+
 /* 位置1 分组内容区：维持原生列表样式 */
 .pgm-group-content .avatar-container {
     /* 不做任何修改，保持ST原生样式 */
