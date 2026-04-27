@@ -66,6 +66,38 @@ jQuery(async () => {
 
     console.log(`[${EXT_NAME}] Loaded successfully.`);
 });
+        }
+    } else {
+        try {
+            initQuickPanel();
+            console.log(`[${EXT_NAME}] Quick panel initialized.`);
+        } catch (err) {
+            console.error(`[${EXT_NAME}] Quick panel init failed:`, err);
+        }
+    }
+
+    const refreshAll = () => {
+        try { refreshMainPanel(); } catch(e) {}
+        try { refreshQuickPanel(); } catch(e) {}
+    };
+
+    if (eventSource && event_types) {
+        if (event_types.SETTINGS_UPDATED) {
+            eventSource.on(event_types.SETTINGS_UPDATED, refreshAll);
+        }
+        if (event_types.CHAT_CHANGED) {
+            eventSource.on(event_types.CHAT_CHANGED, refreshAll);
+        }
+    }
+
+    const observerTarget = document.getElementById('user_avatar_block');
+    if (observerTarget) {
+        const observer = new MutationObserver(refreshAll);
+        observer.observe(observerTarget, { childList: true, subtree: false });
+    }
+
+    console.log(`[${EXT_NAME}] Loaded successfully.`);
+});
     if (isQuickPersonaEnabled()) {
         toastr.warning(
             'Persona Groups 检测到 Quick Persona 已启用，快捷弹窗已禁用。请二选一。',
