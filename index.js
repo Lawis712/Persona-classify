@@ -1,18 +1,14 @@
-import { extension_settings, getContext } from '../../../extensions.js';
-import { eventSource, event_types, saveSettingsDebounced } from '../../../../script.js';
-import { power_user } from '../../../power-user.js';
+import { extension_settings } from '../../../extensions.js';
+import { eventSource, event_types } from '../../../../script.js';
 
-import { initStorage, getGroups, saveGroups } from './src/storage.js';
+import { initStorage } from './src/storage.js';
 import { initMainPanel, refreshMainPanel } from './src/panel-main.js';
 import { initQuickPanel, refreshQuickPanel } from './src/panel-quick.js';
 
-const EXT_ID = 'SillyTavern-PersonaGroups';
 const EXT_NAME = 'Persona Groups';
 
-// 检测 Quick Persona 是否启用
 function isQuickPersonaEnabled() {
     try {
-        // Quick Persona 扩展的设置键
         const qp = extension_settings.quickPersona;
         return qp && qp.enabled === true;
     } catch (e) {
@@ -23,17 +19,53 @@ function isQuickPersonaEnabled() {
 jQuery(async () => {
     console.log(`[${EXT_NAME}] Loading...`);
 
-    // 1. 初始化存储
     initStorage();
 
-    // 2. 初始化主面板（位置1：用户设定）
     try {
         initMainPanel();
+        console.log(`[${EXT_NAME}] Main panel initialized.`);
     } catch (err) {
         console.error(`[${EXT_NAME}] Main panel init failed:`, err);
     }
 
-    // 3. 初始化快捷弹窗（位置2：底栏）
+    if (isQuickPersonaEnabled()) {
+        if (typeof toastr !== 'undefined') {
+            toastr.warning(
+                'Persona Groups 检测到 Quick Persona 已启用，快捷弹窗已禁用。',
+                'Persona Groups'
+            );
+        }
+    } else {
+        try {
+            initQuickPanel();
+            console.log(`[${EXT_NAME}] Quick panel initialized.`);
+        } catch (err) {
+            console.error(`[${EXT_NAME}] Quick panel init failed:`, err);
+        }
+    }
+
+    const refreshAll = () => {
+        try { refreshMainPanel(); } catch(e) {}
+        try { refreshQuickPanel(); } catch(e) {}
+    };
+
+    if (eventSource && event_types) {
+        if (event_types.SETTINGS_UPDATED) {
+            eventSource.on(event_types.SETTINGS_UPDATED, refreshAll);
+        }
+        if (event_types.CHAT_CHANGED) {
+            eventSource.on(event_types.CHAT_CHANGED, refreshAll);
+        }
+    }
+
+    const observerTarget = document.getElementById('user_avatar_block');
+    if (observerTarget) {
+        const observer = new MutationObserver(refreshAll);
+        observer.observe(observerTarget, { childList: true, subtree: false });
+    }
+
+    console.log(`[${EXT_NAME}] Loaded successfully.`);
+});
     if (isQuickPersonaEnabled()) {
         toastr.warning(
             'Persona Groups 检测到 Quick Persona 已启用，快捷弹窗已禁用。请二选一。',
