@@ -47,6 +47,959 @@
         const result = [];
         try {
             const context = getContext();
+
+            // 方案1：从 power_user 获取
+            const pu = typeof power_user !== 'undefined' ? power_user : null;
+            if (pu && pu.personas && Object.keys(pu.personas).length > 0) {
+                for (const [key, name] of Object.entries(pu.personas)) {
+                    const descObj = pu.persona_descriptions?.[key];
+                    const description = typeof descObj === 'object' ? descObj.description : (descObj || '');
+                    result.push({
+                        key,
+                        name: name || key,
+                        description: description || '',
+                        bound: isPersonaBound(key),
+                        avatarUrl: getPersonaAvatarUrl(key),
+                    });
+                }
+            }
+
+            // 方案2：如果 power_user 没数据，从 DOM 中抓取
+            if (result.length === 0) {
+                const avatarBlock = document.getElementById('user_avatar_block');
+                if (avatarBlock) {
+                    const avatarContainers = avatarBlock.querySelectorAll('.avatar-container');
+                    avatarContainers.forEach(el => {
+                        const key = getPersonaKeyFromElement(el);
+                        if (!key) return;
+
+                        const nameEl = el.querySelector('.ch_name, .avatar-name, span');
+                        const name = nameEl?.textContent?.trim() || key;
+
+                        const img = el.querySelector('img');
+                        const avatarUrl = img?.getAttribute('src') || getPersonaAvatarUrl(key);
+
+                        result.push({
+                            key,
+                            name,
+                            description: '',
+                            bound: isPersonaBound(key),
+                            avatarUrl,
+                        });
+                    });
+                }
+            }
+
+            // 方案3：备用日志
+            if (result.length === 0) {
+                console.warn('[PGM] 未能从 power_user 或 DOM 获取到任何 persona 数据');
+            }
+
+            console.log('[PGM] 检测到人设数量:', result.length, result.map(p => p.key));
+
+        } catch (e) {
+            console.error('[PGM] getAllPersonas error:', e);
+        }
+        return result;
+    }
+
+    function isPersonaBound(personaKey) {
+        try {
+            const pu = typeof power_user !== 'undefined' ? power_user : null;
+            if (!pu) return false;
+
+            if (pu.persona_bind && typeof pu.persona_bind === 'object') {
+                return Object.values(pu.persona_bind).includes(personaKey);
+            }
+            return false;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function getPersonaAvatarUrl(key) {
+        return `/User Avatars/${key}`;
+    }
+
+    function getCurrentPersonaKey() {
+        try {
+            const pu = typeof power_user !== 'undefined' ? power_user : null;
+            return pu?.user_avatar || '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function switchPersona(personaKey) {
+        try {
+            const event = new CustomEvent('persona_switch_request', { detail: { key: personaKey } });
+            document.dispatchEvent(event);
+
+            if (typeof setUserAvatar === 'function') {
+                setUserAvatar(personaKey);
+                return;
+            }
+
+            // 备用方案：模拟点击
+            const avatarElements = document.querySelectorAll('#user_avatar_block .avatar-container');
+            for (const el of avatarElements) {
+                const imgEl = el.querySelector('img');
+                if (imgEl) {
+                    const src = imgEl.getAttribute('src') || '';
+                    if (src.includes(encodeURIComponent(personaKey)) || src.includes(personaKey)) {
+                        el.click();
+                        return;
+                    }
+                }
+                if (el.dataset?.persona === personaKey || el.getAttribute('imgfile') === personaKey) {
+                    el.click();
+                    return;
+                }
+            }
+
+            // 第三备用方案：STScript
+            if (typeof executeSlashCommands === 'function') {
+                executeSlashCommands(`/persona ${personaKey}`);
+            }
+        } catch (e) {
+            console.error('[PGM] switchPersona error:', e);
+        }
+    }
+
+    function truncateText(text, maxLen) {
+        if (!text) return '';
+        return text.length > maxLen ? text.substring(0, maxLen) + '...' : text;
+    }
+
+    // ========== 分组数据操作 ==========
+
+    function getGroups() {
+        const settings = getSettings();
+        return [...settings.groups].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    }
+
+    function addGroup(name) {
+        const settings = getSettings();
+        const group = {
+            id: generateId(),
+            name: name,
+            order: settings.groups.length,
+            collapsed: false,
+        };
+        settings.groups.push(group);
+        saveSettings();
+        return group;
+    }
+
+    function renameGroup(groupId, newName) {
+        const settings = getSettings();
+        const group = settings.groups.find(g => g.id === groupId);
+        if (group) {
+            group.name = newName;
+            saveSettings();
+        }
+    }
+
+    function deleteGroup(groupId) {
+        const settings = getSettings();
+        settings.groups = settings.groups.filter(g => g.id !== groupId);
+        for (const [key, gid] of Object.entries(settings.personaGroupMap)) {
+            if (gid === groupId) {
+                delete settings.personaGroupMap[key];
+            }
+        }
+        saveSettings();
+    }
+
+    function toggleGroupCollapse(groupId, target) {
+        const settings = getSettings();
+        if (target === 'quick') {
+            if (!settings.quickCollapsed) settings.quickCollapsed = {};
+            settings.quickCollapsed[groupId] = !settings.quickCollapsed[groupId];
+        } else {
+            const group = settings.groups.find(g => g.id === groupId);
+            if (group) {
+                group.collapsed = !group.collapsed;
+            }
+        }
+        saveSettings();
+    }
+
+    function setPersonaGroup(personaKey, groupId) {
+        const settings = getSettings();
+        if (groupId) {
+            settings.personaGroupMap[personaKey] = groupId;
+        } else {
+            delete settings.personaGroupMap[personaKey];
+        }
+        saveSettings();
+    }
+
+    function getPersonasByGroup(personas) {
+        const settings = getSettings();
+        const groups = getGroups();
+        const grouped = {};
+        const ungrouped = [];
+
+        for (const g of groups) {
+            grouped[g.id] = [];
+        }
+
+        for (const p of personas) {
+            const gid = settings.personaGroupMap[p.key];
+            if (gid && grouped[gid]) {
+                grouped[gid].push(p);
+            } else {
+                ungrouped.push(p);
+            }
+        }
+
+        return { groups, grouped, ungrouped };
+    }
+
+    // ========== 右键菜单 ==========
+
+    function showContextMenu(e, personaKey) {
+        e.preventDefault();
+        removeContextMenu();
+
+        const settings = getSettings();
+        const groups = getGroups();
+        const currentGroup = settings.personaGroupMap[personaKey] || null;
+
+        const menu = document.createElement('div');
+        menu.className = 'pgm-context-menu';
+        menu.style.left = e.clientX + 'px';
+        menu.style.top = e.clientY + 'px';
+
+        const title = document.createElement('div');
+        title.className = 'pgm-context-menu-item';
+        title.style.fontWeight = 'bold';
+        title.style.cursor = 'default';
+        title.style.opacity = '0.6';
+        title.style.fontSize = '11px';
+        title.textContent = '移动到分组';
+        menu.appendChild(title);
+
+        const divider1 = document.createElement('div');
+        divider1.className = 'pgm-context-menu-divider';
+        menu.appendChild(divider1);
+
+        for (const g of groups) {
+            const item = document.createElement('div');
+            item.className = 'pgm-context-menu-item';
+            item.textContent = (currentGroup === g.id ? '✓ ' : '　') + g.name;
+            item.addEventListener('click', () => {
+                setPersonaGroup(personaKey, g.id);
+                removeContextMenu();
+                refreshAllViews();
+            });
+            menu.appendChild(item);
+        }
+
+        if (currentGroup) {
+            const divider2 = document.createElement('div');
+            divider2.className = 'pgm-context-menu-divider';
+            menu.appendChild(divider2);
+
+            const removeItem = document.createElement('div');
+            removeItem.className = 'pgm-context-menu-item';
+            removeItem.textContent = '✕ 移出分组';
+            removeItem.addEventListener('click', () => {
+                setPersonaGroup(personaKey, null);
+                removeContextMenu();
+                refreshAllViews();
+            });
+            menu.appendChild(removeItem);
+        }
+
+        const divider3 = document.createElement('div');
+        divider3.className = 'pgm-context-menu-divider';
+        menu.appendChild(divider3);
+
+        const newGroupItem = document.createElement('div');
+        newGroupItem.className = 'pgm-context-menu-item';
+        newGroupItem.textContent = '+ 新建分组并移入';
+        newGroupItem.addEventListener('click', () => {
+            removeContextMenu();
+            const name = prompt('输入分组名称：');
+            if (name && name.trim()) {
+                const group = addGroup(name.trim());
+                setPersonaGroup(personaKey, group.id);
+                refreshAllViews();
+            }
+        });
+        menu.appendChild(newGroupItem);
+
+        document.body.appendChild(menu);
+
+        const rect = menu.getBoundingClientRect();
+        if (rect.right > window.innerWidth) {
+            menu.style.left = (window.innerWidth - rect.width - 5) + 'px';
+        }
+        if (rect.bottom > window.innerHeight) {
+            menu.style.top = (window.innerHeight - rect.height - 5) + 'px';
+        }
+
+        setTimeout(() => {
+            document.addEventListener('click', removeContextMenu, { once: true });
+        }, 0);
+    }
+
+    function removeContextMenu() {
+        document.querySelectorAll('.pgm-context-menu').forEach(el => el.remove());
+    }
+
+    // ========== 位置1：用户设定管理面板增强 ==========
+
+    let panelObserver = null;
+    let currentFilter = 'all';
+
+    function initPanelEnhancement() {
+        observePanel();
+    }
+
+    function observePanel() {
+        const observer = new MutationObserver((mutations) => {
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (node.nodeType !== 1) continue;
+                    if (isPersonaPanel(node)) {
+                        setTimeout(() => enhancePanel(), 100);
+                    }
+                    const inner = node.querySelector?.('#user_avatar_block, .persona_manager');
+                    if (inner) {
+                        setTimeout(() => enhancePanel(), 100);
+                    }
+                }
+            }
+        });
+
+        observer.observe(document.body, { childList: true, subtree: true });
+        panelObserver = observer;
+
+        const checkExisting = () => {
+            const panel = findPersonaPanel();
+            if (panel && !panel.dataset.pgmEnhanced) {
+                enhancePanel();
+            }
+        };
+
+        setInterval(checkExisting, 1000);
+    }
+
+    function isPersonaPanel(node) {
+        if (!node || !node.matches) return false;
+        return node.matches('#user_avatar_block, .persona_manager, [id*="persona"]');
+    }
+
+    function findPersonaPanel() {
+        return document.querySelector('#user_avatar_block')
+            || document.querySelector('.persona_manager')
+            || document.querySelector('#persona-management-block');
+    }
+
+    function findPersonaListContainer() {
+        const panel = findPersonaPanel();
+        if (!panel) return null;
+
+        const avatarContainers = panel.querySelectorAll('.avatar-container');
+        if (avatarContainers.length > 0) {
+            return avatarContainers[0].parentElement;
+        }
+        return null;
+    }
+
+    function enhancePanel() {
+        const panel = findPersonaPanel();
+        if (!panel) return;
+
+        const listContainer = findPersonaListContainer();
+        if (!listContainer) return;
+
+        if (panel.dataset.pgmEnhanced === 'true') {
+            refreshPanelView();
+            return;
+        }
+
+        panel.dataset.pgmEnhanced = 'true';
+
+        injectPanelControls(listContainer);
+        refreshPanelView();
+    }
+
+    function injectPanelControls(listContainer) {
+        if (document.getElementById('pgm-panel-controls')) return;
+
+        const controlsDiv = document.createElement('div');
+        controlsDiv.id = 'pgm-panel-controls';
+
+        const filters = [
+            { key: 'all', label: '全部' },
+            { key: 'bound', label: '已绑定' },
+            { key: 'unbound', label: '未绑定' },
+        ];
+
+        for (const f of filters) {
+            const btn = document.createElement('button');
+            btn.className = 'pgm-filter-btn' + (currentFilter === f.key ? ' active' : '');
+            btn.textContent = f.label;
+            btn.dataset.filter = f.key;
+            btn.addEventListener('click', () => {
+                currentFilter = f.key;
+                document.querySelectorAll('#pgm-panel-controls .pgm-filter-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                refreshPanelView();
+            });
+            controlsDiv.appendChild(btn);
+        }
+
+        const addBtn = document.createElement('button');
+        addBtn.id = 'pgm-add-group-btn';
+        addBtn.textContent = '+ 新建分组';
+        addBtn.addEventListener('click', () => {
+            const name = prompt('输入分组名称：');
+            if (name && name.trim()) {
+                addGroup(name.trim());
+                refreshAllViews();
+            }
+        });
+        controlsDiv.appendChild(addBtn);
+
+        listContainer.parentNode.insertBefore(controlsDiv, listContainer);
+    }
+
+    function refreshPanelView() {
+        const listContainer = findPersonaListContainer();
+        if (!listContainer) return;
+
+        const personas = getAllPersonas();
+
+        let filtered = personas;
+        if (currentFilter === 'bound') {
+            filtered = personas.filter(p => p.bound);
+        } else if (currentFilter === 'unbound') {
+            filtered = personas.filter(p => !p.bound);
+        }
+
+        const { groups, grouped, ungrouped } = getPersonasByGroup(filtered);
+
+        const originalElements = {};
+        listContainer.querySelectorAll('.avatar-container').forEach(el => {
+            const key = getPersonaKeyFromElement(el);
+            if (key) {
+                originalElements[key] = el;
+            }
+        });
+
+        listContainer.querySelectorAll('.avatar-container').forEach(el => {
+            el.style.display = 'none';
+        });
+
+        listContainer.querySelectorAll('.pgm-group-section, .pgm-ungrouped-separator, .pgm-ungrouped-wrapper').forEach(el => el.remove());
+
+        for (const group of groups) {
+            const personasInGroup = grouped[group.id] || [];
+            if (personasInGroup.length === 0) continue;
+
+            const section = createGroupSection(group, personasInGroup, originalElements, 'panel');
+            listContainer.insertBefore(section, listContainer.firstChild);
+        }
+
+        if (ungrouped.length > 0) {
+            if (groups.some(g => (grouped[g.id] || []).length > 0)) {
+                const separator = document.createElement('div');
+                separator.className = 'pgm-ungrouped-separator';
+                separator.textContent = '未分组';
+                listContainer.appendChild(separator);
+            }
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'pgm-ungrouped-wrapper';
+
+            for (const p of ungrouped) {
+                const el = originalElements[p.key];
+                if (el) {
+                    el.style.display = '';
+                    wrapper.appendChild(el);
+                    attachContextMenu(el, p.key);
+                }
+            }
+            listContainer.appendChild(wrapper);
+        }
+    }
+
+    function createGroupSection(group, personas, originalElements, mode) {
+        const section = document.createElement('div');
+        section.className = 'pgm-group-section';
+        section.dataset.groupId = group.id;
+
+        section.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            section.classList.add('pgm-drag-over');
+        });
+        section.addEventListener('dragleave', () => {
+            section.classList.remove('pgm-drag-over');
+        });
+        section.addEventListener('drop', (e) => {
+            e.preventDefault();
+            section.classList.remove('pgm-drag-over');
+            const personaKey = e.dataTransfer.getData('text/persona-key');
+            if (personaKey) {
+                setPersonaGroup(personaKey, group.id);
+                refreshAllViews();
+            }
+        });
+
+        const header = document.createElement('div');
+        header.className = 'pgm-group-header';
+
+        const arrow = document.createElement('span');
+        arrow.className = 'pgm-group-arrow' + (group.collapsed ? ' collapsed' : '');
+        arrow.textContent = '▼';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'pgm-group-name';
+        nameSpan.textContent = group.name;
+
+        const countSpan = document.createElement('span');
+        countSpan.className = 'pgm-group-count';
+        countSpan.textContent = `(${personas.length})`;
+
+        const actions = document.createElement('div');
+        actions.className = 'pgm-group-actions';
+
+        if (mode === 'panel') {
+            const renameBtn = document.createElement('button');
+            renameBtn.textContent = '✏️';
+            renameBtn.title = '重命名';
+            renameBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const newName = prompt('重命名分组：', group.name);
+                if (newName && newName.trim()) {
+                    renameGroup(group.id, newName.trim()); // 修复：原来是 roup()
+                    refreshAllViews();
+                }
+            });
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.textContent = '🗑️';
+            deleteBtn.title = '删除分组';
+            deleteBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (confirm(`确定删除分组「${group.name}」吗？\n（人设不会被删除，会回到未分组状态）`)) {
+                    deleteGroup(group.id);
+                    refreshAllViews();
+                }
+            });
+
+            actions.appendChild(renameBtn);
+            actions.appendChild(deleteBtn);
+        }
+
+        header.appendChild(arrow);
+        header.appendChild(nameSpan);
+        header.appendChild(countSpan);
+        header.appendChild(actions);
+
+        const isCollapsed = mode === 'quick'
+            ? (getSettings().quickCollapsed?.[group.id] || false)
+            : group.collapsed;
+
+        header.addEventListener('click', () => {
+            toggleGroupCollapse(group.id, mode === 'quick' ? 'quick' : 'panel');
+            const content = section.querySelector('.pgm-group-content');
+            const arrowEl = section.querySelector('.pgm-group-arrow');
+            if (content) content.classList.toggle('collapsed');
+            if (arrowEl) arrowEl.classList.toggle('collapsed');
+        });
+
+        section.appendChild(header);
+
+        const content = document.createElement('div');
+        content.className = 'pgm-group-content' + (isCollapsed ? ' collapsed' : '');
+
+        if (mode === 'panel') {
+            for (const p of personas) {
+                const el = originalElements?.[p.key];
+                if (el) {
+                    el.style.display = '';
+                    content.appendChild(el);
+                    attachContextMenu(el, p.key);
+                    makeDraggable(el, p.key);
+                }
+            }
+        } else if (mode === 'quick') {
+            const grid = document.createElement('div');
+            grid.className = 'pgm-quick-grid';
+            const currentKey = getCurrentPersonaKey();
+
+            for (const p of personas) {
+                const avatarDiv = createQuickAvatarItem(p, currentKey);
+                grid.appendChild(avatarDiv);
+            }
+            content.appendChild(grid);
+        }
+
+        if (isCollapsed) {
+            const arrowEl = header.querySelector('.pgm-group-arrow');
+            if (arrowEl) arrowEl.classList.add('collapsed');
+        }
+
+        section.appendChild(content);
+        return section;
+    }
+
+    function getPersonaKeyFromElement(el) {
+        if (!el) return '';
+
+        // 方式1: imgfile 属性（很多版本用这个）
+        const imgFile = el.getAttribute('imgfile');
+        if (imgFile) return imgFile;
+
+        // 方式2: data 属性
+        if (el.dataset?.persona) return el.dataset.persona;
+        if (el.dataset?.avatarKey) return el.dataset.avatarKey;
+
+        // 方式3: 从 img src 中提取
+        const img = el.querySelector('img');
+        if (img) {
+            const src = decodeURIComponent(img.getAttribute('src') || '');
+            // 路径格式：/User Avatars/xxx.png 或 /api/avatars/xxx.png
+            const match = src.match(/(?:User\s*Avatars|avatars)\/([^?#]+)/i);
+            if (match) return match[1];
+        }
+
+        // 方式4: title
+        const title = el.getAttribute('title');
+        if (title) return title;
+
+        // 方式5: 直接从包含的文本推断
+        const textEl = el.querySelector('.ch_name, .avatar-name');
+        if (textEl) {
+            const name = textEl.textContent?.trim();
+            const pu = typeof power_user !== 'undefined' ? power_user : null;
+            if (pu?.personas && name) {
+                for (const [k, v] of Object.entries(pu.personas)) {
+                    if (v === name) return k;
+                }
+            }
+        }
+
+        return '';
+    }
+
+    function attachContextMenu(el, personaKey) {
+        if (el.dataset.pgmContextMenu) return;
+        el.dataset.pgmContextMenu = 'true';
+
+        el.addEventListener('contextmenu', (e) => {
+            showContextMenu(e, personaKey);
+        });
+    }
+
+    function makeDraggable(el, personaKey) {
+        if (el.dataset.pgmDraggable) return;
+        el.dataset.pgmDraggable = 'true';
+        el.setAttribute('draggable', 'true');
+
+        el.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('text/persona-key', personaKey);
+            el.classList.add('pgm-dragging');
+        });
+
+        el.addEventListener('dragend', () => {
+            el.classList.remove('pgm-dragging');
+            document.querySelectorAll('.pgm-drag-over').forEach(x => x.classList.remove('pgm-drag-over'));
+        });
+    }
+
+    // ========== 位置2：底部快捷弹窗 ==========
+
+    function initQuickPopup() {
+        const sendForm = document.getElementById('send_form')
+            || document.querySelector('#send_but_sheld')?.parentElement
+            || document.querySelector('.send_form');
+
+        if (!sendForm) {
+            console.warn('[PGM] 未找到输入栏，延迟重试...');
+            setTimeout(initQuickPopup, 2000);
+            return;
+        }
+
+        if (document.getElementById('pgm-quick-btn')) return;
+
+        // 创建按钮
+        const btn = document.createElement('div');
+        btn.id = 'pgm-quick-btn';
+        btn.title = '快速切换人设';
+
+        const btnImg = document.createElement('img');
+        btnImg.id = 'pgm-quick-btn-img';
+        updateQuickBtnAvatar(btnImg);
+        btn.appendChild(btnImg);
+
+        // 修复：插入到魔法棒（#send_but_sheld）右边
+        const sendButSheld = document.getElementById('send_but_sheld');
+        if (sendButSheld) {
+            sendButSheld.insertAdjacentElement('afterend', btn);
+        } else {
+            // 备用方案：找右侧按钮区域
+            const rightButtons = sendForm.querySelector('#rightSendForm')
+                || sendForm.querySelector('.rightSendForm');
+            if (rightButtons) {
+                rightButtons.insertBefore(btn, rightButtons.firstChild);
+            } else {
+                sendForm.appendChild(btn);
+            }
+        }
+
+        // 创建弹窗
+        const overlay = document.createElement('div');
+        overlay.id = 'pgm-quick-overlay';
+        document.body.appendChild(overlay);
+
+        const popup = document.createElement('div');
+        popup.id = 'pgm-quick-popup';
+        document.body.appendChild(popup);
+
+        // 事件
+        btn.addEventListener('click', () => {
+            toggleQuickPopup();
+        });
+
+        overlay.addEventListener('click', () => {
+            closeQuickPopup();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && popup.classList.contains('visible')) {
+                closeQuickPopup();
+            }
+        });
+    }
+
+    function updateQuickBtnAvatar(imgEl) {
+        if (!imgEl) imgEl = document.getElementById('pgm-quick-btn-img');
+        if (!imgEl) return;
+
+        const currentKey = getCurrentPersonaKey();
+        if (currentKey) {
+            imgEl.src = getPersonaAvatarUrl(currentKey);
+            imgEl.onerror = () => {
+                imgEl.src = '/img/ai4.png';
+            };
+        } else {
+            imgEl.src = '/img/ai4.png';
+        }
+    }
+
+    function toggleQuickPopup() {
+        const popup = document.getElementById('pgm-quick-popup');
+        const overlay = document.getElementById('pgm-quick-overlay');
+        if (!popup || !overlay) return;
+
+        if (popup.classList.contains('visible')) {
+            closeQuickPopup();
+        } else {
+            renderQuickPopup();
+            popup.classList.add('visible');
+            overlay.classList.add('visible');
+        }
+    }
+
+    function closeQuickPopup() {
+        const popup = document.getElementById('pgm-quick-popup');
+        const overlay = document.getElementById('pgm-quick-overlay');
+        if (popup) popup.classList.remove('visible');
+        if (overlay) overlay.classList.remove('visible');
+    }
+
+    function renderQuickPopup() {
+        const popup = document.getElementById('pgm-quick-popup');
+        if (!popup) return;
+
+        popup.innerHTML = '';
+
+        const searchInput = document.createElement('input');
+        searchInput.className = 'pgm-quick-search';
+        searchInput.type = 'text';
+        searchInput.placeholder = '🔍 搜索人设...';
+        searchInput.addEventListener('input', () => {
+            renderQuickContent(popup, searchInput.value.toLowerCase());
+        });
+        popup.appendChild(searchInput);
+
+        const contentDiv = document.createElement('div');
+        contentDiv.id = 'pgm-quick-content';
+        popup.appendChild(contentDiv);
+
+        renderQuickContent(popup, '');
+    }
+
+    function renderQuickContent(popup, searchTerm) {
+        let contentDiv = popup.querySelector('#pgm-quick-content');
+        if (!contentDiv) return;
+        contentDiv.innerHTML = '';
+
+        let personas = getAllPersonas();
+
+        if (searchTerm) {
+            personas = personas.filter(p =>
+                p.name.toLowerCase().includes(searchTerm) ||
+                p.description.toLowerCase().includes(searchTerm)
+            );
+        }
+
+        const { groups, grouped, ungrouped } = getPersonasByGroup(personas);
+        const currentKey = getCurrentPersonaKey();
+
+        for (const group of groups) {
+            const personasInGroup = grouped[group.id] || [];
+            if (personasInGroup.length === 0) continue;
+
+            const section = createGroupSection(group, personasInGroup, null, 'quick');
+            contentDiv.appendChild(section);
+        }
+
+        if (ungrouped.length > 0) {
+            if (groups.some(g => (grouped[g.id] || []).length > 0)) {
+                const separator = document.createElement('div');
+                separator.className = 'pgm-ungrouped-separator';
+                separator.textContent = '未分组';
+                contentDiv.appendChild(separator);
+            }
+
+            const grid = document.createElement('div');
+            grid.className = 'pgm-quick-grid';
+
+            for (const p of ungrouped) {
+                const avatarDiv = createQuickAvatarItem(p, currentKey);
+                grid.appendChild(avatarDiv);
+            }
+            contentDiv.appendChild(grid);
+        }
+
+        if (personas.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.cssText = 'text-align:center;padding:20px;color:var(--SmartThemeQuoteColor,#888);font-size:13px;';
+            empty.textContent = searchTerm ? '没有找到匹配的人设' : '暂无人设';
+            contentDiv.appendChild(empty);
+        }
+    }
+
+    function createQuickAvatarItem(persona, currentKey) {
+        const avatarDiv = document.createElement('div');
+        avatarDiv.className = 'pgm-quick-avatar' + (persona.key === currentKey ? ' active' : '');
+        avatarDiv.title = persona.name + (persona.description ? '\n' + truncateText(persona.description, 80) : '');
+
+        const img = document.createElement('img');
+        img.src = getPersonaAvatarUrl(persona.key);
+        img.loading = 'lazy';
+        img.onerror = () => { img.src = '/img/ai4.png'; };
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'pgm-quick-avatar-name';
+        nameSpan.textContent = persona.name;
+
+        avatarDiv.appendChild(img);
+        avatarDiv.appendChild(nameSpan);
+
+        avatarDiv.addEventListener('click', () => {
+            switchPersona(persona.key);
+            closeQuickPopup();
+            setTimeout(() => updateQuickBtnAvatar(), 300);
+        });
+
+        avatarDiv.addEventListener('contextmenu', (e) => {
+            showContextMenu(e, persona.key);
+        });
+
+        return avatarDiv;
+    }
+
+    // ========== 刷新所有视图 ==========
+
+    function refreshAllViews() {
+        const panel = findPersonaPanel();
+        if (panel) {
+            panel.dataset.pgmEnhanced = 'false';
+            enhancePanel();
+        }
+
+        const popup = document.getElementById('pgm-quick-popup');
+        if (popup && popup.classList.contains('visible')) {
+            const searchInput = popup.querySelector('.pgm-quick-search');
+            renderQuickContent(popup, searchInput?.value?.toLowerCase() || '');
+        }
+
+        updateQuickBtnAvatar();
+    }
+
+    // ========== 初始化 ==========
+
+    function init() {
+        console.log('[PGM] Persona Group Manager 初始化...');
+
+        getSettings();
+
+        initPanelEnhancement();
+        initQuickPopup();
+
+        const eventSource = getContext().eventSource;
+        if (eventSource) {
+            const possibleEvents = [
+                'persona_updated',
+                'PERSONA_UPDATED',
+                'settings_updated',
+            ];
+            for (const eventName of possibleEvents) {
+                try {
+                    eventSource.on(eventName, () => {
+                        setTimeout(refreshAllViews, 200);
+                    });
+                } catch (e) {
+                    // 忽略不存在的事件
+                }
+            }
+        }
+
+        document.addEventListener('persona_switch_complete', () => {
+            setTimeout(() => {
+                updateQuickBtnAvatar();
+                refreshAllViews();
+            }, 300);
+        });
+
+        console.log('[PGM] Persona Group Manager 初始化完成！');
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => setTimeout(init, 1500));
+    } else {
+        setTimeout(init, 1500);
+    }
+
+    if (typeof jQuery !== 'undefined') {
+        jQuery(async () => {
+            setTimeout(init, 2000);
+        });
+    }
+
+})();
+
+    function generateId() {
+        return 'g_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    }
+
+    /**
+     * 获取所有 persona 数据
+     * 兼容不同 ST 版本
+     */
+    function getAllPersonas() {
+        const result = [];
+        try {
+            const context = getContext();
             // power_user.personas = { avatarKey: displayName }
             // power_user.persona_descriptions = { avatarKey: { description, position } }
             const pu = typeof power_user !== 'undefined' ? power_user : null;
