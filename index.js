@@ -13,11 +13,34 @@
         return window.SillyTavern?.getContext?.() || SillyTavern.getContext();
     }
 
+    /**
+     * 兼容获取 power_user 对象
+     * 不同 ST 版本存放位置不同
+     */
+    function getPowerUser() {
+        try {
+            // 全局变量（旧版本）
+            if (typeof power_user !== 'undefined' && power_user?.personas) {
+                return power_user;
+            }
+        } catch (e) { /* ignore */ }
+
+        try {
+            // context.powerUserSettings（新版本）
+            const ctx = getContext();
+            if (ctx.powerUserSettings?.personas) {
+                return ctx.powerUserSettings;
+            }
+        } catch (e) { /* ignore */ }
+
+        return null;
+    }
+
     function getDefaultSettings() {
         return {
             groups: [],          // [{ id, name, order, collapsed }]
             personaGroupMap: {}, // { personaKey: groupId }
-            quickCollapsed: {},  // { groupId: bool } 快捷弹窗折叠状态
+            quickCollapsed: {},  // { groupId: bool }
             version: 1,
         };
     }
@@ -41,17 +64,18 @@
 
     /**
      * 获取所有 persona 数据
-     * 兼容不同 ST 版本
+     * 优先从 power_user 获取，回退到 DOM 抓取
      */
     function getAllPersonas() {
         const result = [];
+        const seen = new Set();
         try {
-            const context = getContext();
-
-            // 方案1：从 power_user 获取
-            const pu = typeof power_user !== 'undefined' ? power_user : null;
+            // 方案1：从 power_user / powerUserSettings 获取
+            const pu = getPowerUser();
             if (pu && pu.personas && Object.keys(pu.personas).length > 0) {
                 for (const [key, name] of Object.entries(pu.personas)) {
+                    if (seen.has(key)) continue;
+                    seen.add(key);
                     const descObj = pu.persona_descriptions?.[key];
                     const description = typeof descObj === 'object' ? descObj.description : (descObj || '');
                     result.push({
@@ -60,6 +84,1029 @@
                         description: description || '',
                         bound: isPersonaBound(key),
                         avatarUrl: getPersonaAvatarUrl(key),
+                    });
+                }
+            }
+
+            // 方案2：从 DOM 抓取（当方案1无数据时）
+            if (result.length === 0) {
+                const avatarBlock = document.getElementById('user_avatar_block');
+                if (avatarBlock) {
+                    const avatarContainers = avatarBlock.querySelectorAll('.avatar-container');
+                    avatarContainers.forEach(el => {
+                        const key = getPersonaKeyFromElement(el);
+                        if (!key || seen.has(key)) return;
+                        seen.add(key);
+
+                        // 尝试多种方式获取名字
+                        let name = '';
+                        const nameSelectors = [
+                            '.character_name_block span',
+                            '.ch_name',
+                            '.avatar-name',
+                            '.character_name_block',
+                        ];
+                        for (const sel of nameSelectors) {
+                            const nameEl = el.querySelector(sel);
+                            if (nameEl) {
+                                name = nameEl.textContent?.trim();
+                                if (name) break;
+                            }
+                        }
+                        if (!name) name = key.replace(/\.[^.]+$/, '');
+
+                        // 获取头像URL
+                        const img = el.querySelector('img');
+                        const avatarUrl = img?.getAttribute('src') || getPersonaAvatarUrl(key);
+
+                        result.push({
+                            key,
+                            name,
+                            description: '',
+                            bound: isPersonaBound(key),
+                            avatarUrl,
+                        });
+                    });
+                }
+            }
+
+            console.log('[PGM] 检测到人设数量:', result.length);
+
+        } catch (e) {
+            console.error('[PGM] getAllPersonas error:', e);
+        }
+        return result;
+    }
+
+    function isPersonaBound(personaKey) {
+        try {
+            const pu = getPowerUser();
+            if (!pu) return false;
+            if (pu.persona_bind && typeof pu.persona_bind === 'object') {
+                return Object.values(pu.persona_bind).includes(personaKey);
+            }
+            return false;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
+     * 获取 persona 头像 URL
+     * 兼容不同版本的路径格式
+     */
+    function getPersonaAvatarUrl(key) {
+        // 新版本用 thumbnail 接口
+        const thumbUrl = `/thumbnail?type=persona&file=${encodeURIComponent(key)}`;
+        // 旧版本用直接路径
+        const directUrl = `/User Avatars/${encodeURIComponent(key)}`;
+
+        // 优先尝试 thumbnail（更通用），如果失败会在 onerror 中回退
+        return thumbUrl;
+    }
+
+    /**
+     * 获取头像回退URL（当主URL加载失败时）
+     */
+    function getPersonaAvatarFallbackUrl(key) {
+        return `/User Avatars/${encodeURIComponent(key)}`;
+    }
+
+    function getCurrentPersonaKey() {
+        try {
+            const pu = getPowerUser();
+            if (pu?.user_avatar) return pu.user_avatar;
+
+            // 备用：从 DOM 中查找当前激活的 persona
+            const activeEl = document.querySelector('#user_avatar_block .avatar-container.selected, #user_avatar_block .avatar-container.active');
+            if (activeEl) {
+                return getPersonaKeyFromElement(activeEl);
+            }
+
+            return '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function switchPersona(personaKey) {
+        try {
+            // 方式1：ST 内部函数
+            if (typeof setUserAvatar === 'function') {
+                setUserAvatar(personaKey);
+                return;
+            }
+
+            // 方式2：模拟点击 DOM 中对应的 persona
+            const avatarBlock = document.getElementById('user_avatar_block');
+            if (avatarBlock) {
+                const containers = avatarBlock.querySelectorAll('.avatar-container');
+                for (const el of containers) {
+                    const key = getPersonaKeyFromElement(el);
+                    if (key === personaKey) {
+                        el.click();
+                        return;
+                    }
+                }
+            }
+
+            // 方式3：STScript 命令
+            const ctx = getContext();
+            if (ctx.executeSlashCommands) {
+                ctx.executeSlashCommands(`/persona ${personaKey}`);
+                return;
+            }
+            if (typeof executeSlashCommands === 'function') {
+                executeSlashCommands(`/persona ${personaKey}`);
+                return;
+            }
+        } catch (e) {
+            console.error('[PGM] switchPersona error:', e);
+        }
+    }
+
+    function truncateText(text, maxLen) {
+        if (!text) return '';
+        return text.length > maxLen ? text.substring(0, maxLen) + '...' : text;
+    }
+
+    // ========== 从 DOM 元素提取 persona key ==========
+
+    function getPersonaKeyFromElement(el) {
+        if (!el) return '';
+
+        // 方式1: data-avatar-id 属性（新版本常用）
+        const avatarId = el.getAttribute('data-avatar-id') || el.dataset?.avatarId;
+        if (avatarId) return avatarId;
+
+        // 方式2: 子元素的 data-avatar-id
+        const innerAvatar = el.querySelector('[data-avatar-id]');
+        if (innerAvatar) {
+            const id = innerAvatar.getAttribute('data-avatar-id');
+            if (id) return id;
+        }
+
+        // 方式3: imgfile 属性
+        const imgFile = el.getAttribute('imgfile');
+        if (imgFile) return imgFile;
+        const innerImgFile = el.querySelector('[imgfile]');
+        if (innerImgFile) return innerImgFile.getAttribute('imgfile');
+
+        // 方式4: data-persona 属性
+        if (el.dataset?.persona) return el.dataset.persona;
+
+        // 方式5: 从 img src 中提取
+        const img = el.querySelector('img');
+        if (img) {
+            const src = decodeURIComponent(img.getAttribute('src') || '');
+            // thumbnail?type=persona&file=xxx.png
+            const thumbMatch = src.match(/[?&]file=([^&#]+)/i);
+            if (thumbMatch) return decodeURIComponent(thumbMatch[1]);
+            // /User Avatars/xxx.png
+            const directMatch = src.match(/(?:User\s*Avatars|avatars)\/([^?#]+)/i);
+            if (directMatch) return decodeURIComponent(directMatch[1]);
+        }
+
+        // 方式6: title 属性
+        const title = el.getAttribute('title');
+        if (title) return title;
+
+        // 方式7: 从名字反查 power_user.personas
+        const nameEl = el.querySelector('.character_name_block span, .ch_name, .avatar-name');
+        if (nameEl) {
+            const name = nameEl.textContent?.trim();
+            const pu = getPowerUser();
+            if (pu?.personas && name) {
+                for (const [k, v] of Object.entries(pu.personas)) {
+                    if (v === name) return k;
+                }
+            }
+        }
+
+        return '';
+    }
+
+    // ========== 分组数据操作 ==========
+
+    function getGroups() {
+        const settings = getSettings();
+        return [...settings.groups].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    }
+
+    function addGroup(name) {
+        const settings = getSettings();
+        const group = {
+            id: generateId(),
+            name: name,
+            order: settings.groups.length,
+            collapsed: false,
+        };
+        settings.groups.push(group);
+        saveSettings();
+        return group;
+    }
+
+    function renameGroup(groupId, newName) {
+        const settings = getSettings();
+        const group = settings.groups.find(g => g.id === groupId);
+        if (group) {
+            group.name = newName;
+            saveSettings();
+        }
+    }
+
+    function deleteGroup(groupId) {
+        const settings = getSettings();
+        settings.groups = settings.groups.filter(g => g.id !== groupId);
+        for (const [key, gid] of Object.entries(settings.personaGroupMap)) {
+            if (gid === groupId) {
+                delete settings.personaGroupMap[key];
+            }
+        }
+        saveSettings();
+    }
+
+    function toggleGroupCollapse(groupId, target) {
+        const settings = getSettings();
+        if (target === 'quick') {
+            if (!settings.quickCollapsed) settings.quickCollapsed = {};
+            settings.quickCollapsed[groupId] = !settings.quickCollapsed[groupId];
+        } else {
+            const group = settings.groups.find(g => g.id === groupId);
+            if (group) {
+                group.collapsed = !group.collapsed;
+            }
+        }
+        saveSettings();
+    }
+
+    function setPersonaGroup(personaKey, groupId) {
+        const settings = getSettings();
+        if (groupId) {
+            settings.personaGroupMap[personaKey] = groupId;
+        } else {
+            delete settings.personaGroupMap[personaKey];
+        }
+        saveSettings();
+    }
+
+    function getPersonasByGroup(personas) {
+        const settings = getSettings();
+        const groups = getGroups();
+        const grouped = {};
+        const ungrouped = [];
+
+        for (const g of groups) {
+            grouped[g.id] = [];
+        }
+
+        for (const p of personas) {
+            const gid = settings.personaGroupMap[p.key];
+            if (gid && grouped[gid]) {
+                grouped[gid].push(p);
+            } else {
+                ungrouped.push(p);
+            }
+        }
+
+        return { groups, grouped, ungrouped };
+    }
+
+    // ========== 右键菜单 ==========
+
+    function showContextMenu(e, personaKey) {
+        e.preventDefault();
+        removeContextMenu();
+
+        const settings = getSettings();
+        const groups = getGroups();
+        const currentGroup = settings.personaGroupMap[personaKey] || null;
+
+        const menu = document.createElement('div');
+        menu.className = 'pgm-context-menu';
+        menu.style.left = e.clientX + 'px';
+        menu.style.top = e.clientY + 'px';
+
+        const title = document.createElement('div');
+        title.className = 'pgm-context-menu-item';
+        title.style.fontWeight = 'bold';
+        title.style.cursor = 'default';
+        title.style.opacity = '0.6';
+        title.style.fontSize = '11px';
+        title.textContent = '移动到分组';
+        menu.appendChild(title);
+
+        const divider1 = document.createElement('div');
+        divider1.className = 'pgm-context-menu-divider';
+        menu.appendChild(divider1);
+
+        for (const g of groups) {
+            const item = document.createElement('div');
+            item.className = 'pgm-context-menu-item';
+            item.textContent = (currentGroup === g.id ? '✓ ' : '　') + g.name;
+            item.addEventListener('click', () => {
+                setPersonaGroup(personaKey, g.id);
+                removeContextMenu();
+                refreshAllViews();
+            });
+            menu.appendChild(item);
+        }
+
+        if (currentGroup) {
+            const divider2 = document.createElement('div');
+            divider2.className = 'pgm-context-menu-divider';
+            menu.appendChild(divider2);
+
+            const removeItem = document.createElement('div');
+            removeItem.className = 'pgm-context-menu-item';
+            removeItem.textContent = '✕ 移出分组';
+            removeItem.addEventListener('click', () => {
+                setPersonaGroup(personaKey, null);
+                removeContextMenu();
+                refreshAllViews();
+            });
+            menu.appendChild(removeItem);
+        }
+
+        const divider3 = document.createElement('div');
+        divider3.className = 'pgm-context-menu-divider';
+        menu.appendChild(divider3);
+
+        const newGroupItem = document.createElement('div');
+        newGroupItem.className = 'pgm-context-menu-item';
+        newGroupItem.textContent = '+ 新建分组并移入';
+        newGroupItem.addEventListener('click', () => {
+            removeContextMenu();
+            const name = prompt('输入分组名称：');
+            if (name && name.trim()) {
+                const group = addGroup(name.trim());
+                setPersonaGroup(personaKey, group.id);
+                refreshAllViews();
+            }
+        });
+        menu.appendChild(newGroupItem);
+
+        document.body.appendChild(menu);
+
+        const rect = menu.getBoundingClientRect();
+        if (rect.right > window.innerWidth) {
+            menu.style.left = (window.innerWidth - rect.width - 5) + 'px';
+        }
+        if (rect.bottom > window.innerHeight) {
+            menu.style.top = (window.innerHeight - rect.height - 5) + 'px';
+        }
+
+        setTimeout(() => {
+            document.addEventListener('click', removeContextMenu, { once: true });
+        }, 0);
+    }
+
+    function removeContextMenu() {
+        document.querySelectorAll('.pgm-context-menu').forEach(el => el.remove());
+    }
+
+    // ========== 位置1：用户设定管理面板增强 ==========
+
+    let currentFilter = 'all';
+
+    function initPanelEnhancement() {
+        observePanel();
+    }
+
+    function observePanel() {
+        const observer = new MutationObserver(() => {
+            const panel = findPersonaPanel();
+            if (panel && !panel.dataset.pgmEnhanced) {
+                setTimeout(() => enhancePanel(), 150);
+            }
+        });
+
+        observer.observe(document.body, { childList: true, subtree: true });
+
+        // 定期检查（兼容各种打开方式）
+        setInterval(() => {
+            const panel = findPersonaPanel();
+            if (panel && !panel.dataset.pgmEnhanced) {
+                enhancePanel();
+            }
+        }, 1500);
+    }
+
+    function findPersonaPanel() {
+        return document.querySelector('#user_avatar_block')
+            || document.querySelector('.persona_manager')
+            || document.querySelector('#persona-management-block');
+    }
+
+    function findPersonaListContainer() {
+        const panel = findPersonaPanel();
+        if (!panel) return null;
+
+        const avatarContainers = panel.querySelectorAll('.avatar-container');
+        if (avatarContainers.length > 0) {
+            return avatarContainers[0].parentElement;
+        }
+        return panel;
+    }
+
+    function enhancePanel() {
+        const panel = findPersonaPanel();
+        if (!panel) return;
+
+        const listContainer = findPersonaListContainer();
+        if (!listContainer) return;
+
+        if (panel.dataset.pgmEnhanced === 'true') {
+            refreshPanelView();
+            return;
+        }
+
+        panel.dataset.pgmEnhanced = 'true';
+        injectPanelControls(listContainer);
+        refreshPanelView();
+    }
+
+    function injectPanelControls(listContainer) {
+        if (document.getElementById('pgm-panel-controls')) return;
+
+        const controlsDiv = document.createElement('div');
+        controlsDiv.id = 'pgm-panel-controls';
+
+        const filters = [
+            { key: 'all', label: '全部' },
+            { key: 'bound', label: '已绑定' },
+            { key: 'unbound', label: '未绑定' },
+        ];
+
+        for (const f of filters) {
+            const btn = document.createElement('button');
+            btn.className = 'pgm-filter-btn' + (currentFilter === f.key ? ' active' : '');
+            btn.textContent = f.label;
+            btn.dataset.filter = f.key;
+            btn.addEventListener('click', () => {
+                currentFilter = f.key;
+                document.querySelectorAll('#pgm-panel-controls .pgm-filter-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                refreshPanelView();
+            });
+            controlsDiv.appendChild(btn);
+        }
+
+        const addBtn = document.createElement('button');
+        addBtn.id = 'pgm-add-group-btn';
+        addBtn.textContent = '+ 新建分组';
+        addBtn.addEventListener('click', () => {
+            const name = prompt('输入分组名称：');
+            if (name && name.trim()) {
+                addGroup(name.trim());
+                refreshAllViews();
+            }
+        });
+        controlsDiv.appendChild(addBtn);
+
+        // 插入到列表容器之前
+        const parent = listContainer.parentNode;
+        if (parent) {
+            parent.insertBefore(controlsDiv, listContainer);
+        }
+    }
+
+    function refreshPanelView() {
+        const listContainer = findPersonaListContainer();
+        if (!listContainer) return;
+
+        const personas = getAllPersonas();
+
+        let filtered = personas;
+        if (currentFilter === 'bound') {
+            filtered = personas.filter(p => p.bound);
+        } else if (currentFilter === 'unbound') {
+            filtered = personas.filter(p => !p.bound);
+        }
+
+        const { groups, grouped, ungrouped } = getPersonasByGroup(filtered);
+
+        // 收集原始 DOM 元素
+        const originalElements = {};
+        listContainer.querySelectorAll('.avatar-container').forEach(el => {
+            const key = getPersonaKeyFromElement(el);
+            if (key) {
+                originalElements[key] = el;
+            }
+        });
+
+        // 隐藏所有原始元素
+        listContainer.querySelectorAll('.avatar-container').forEach(el => {
+            el.style.display = 'none';
+        });
+
+        // 移除之前的分组元素
+        listContainer.querySelectorAll('.pgm-group-section, .pgm-ungrouped-separator, .pgm-ungrouped-wrapper').forEach(el => el.remove());
+
+        // 渲染分组（倒序插入到最前面，保证顺序正确）
+        const groupsReversed = [...groups].reverse();
+        for (const group of groupsReversed) {
+            const personasInGroup = grouped[group.id] || [];
+            if (personasInGroup.length === 0) continue;
+
+            const section = createGroupSection(group, personasInGroup, originalElements, 'panel');
+            listContainer.insertBefore(section, listContainer.firstChild);
+        }
+
+        // 渲染未分组
+        if (ungrouped.length > 0) {
+            if (groups.some(g => (grouped[g.id] || []).length > 0)) {
+                const separator = document.createElement('div');
+                separator.className = 'pgm-ungrouped-separator';
+                separator.textContent = '未分组';
+                listContainer.appendChild(separator);
+            }
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'pgm-ungrouped-wrapper';
+
+            for (const p of ungrouped) {
+                const el = originalElements[p.key];
+                if (el) {
+                    el.style.display = '';
+                    wrapper.appendChild(el);
+                    attachContextMenu(el, p.key);
+                }
+            }
+            listContainer.appendChild(wrapper);
+        }
+    }
+
+    function createGroupSection(group, personas, originalElements, mode) {
+        const section = document.createElement('div');
+        section.className = 'pgm-group-section';
+        section.dataset.groupId = group.id;
+
+        // 拖拽
+        section.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            section.classList.add('pgm-drag-over');
+        });
+        section.addEventListener('dragleave', () => {
+            section.classList.remove('pgm-drag-over');
+        });
+        section.addEventListener('drop', (e) => {
+            e.preventDefault();
+            section.classList.remove('pgm-drag-over');
+            const personaKey = e.dataTransfer.getData('text/persona-key');
+            if (personaKey) {
+                setPersonaGroup(personaKey, group.id);
+                refreshAllViews();
+            }
+        });
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'pgm-group-header';
+
+        const isCollapsed = mode === 'quick'
+            ? (getSettings().quickCollapsed?.[group.id] || false)
+            : group.collapsed;
+
+        const arrow = document.createElement('span');
+        arrow.className = 'pgm-group-arrow' + (isCollapsed ? ' collapsed' : '');
+        arrow.textContent = '▼';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'pgm-group-name';
+        nameSpan.textContent = group.name;
+
+        const countSpan = document.createElement('span');
+        countSpan.className = 'pgm-group-count';
+        countSpan.textContent = `(${personas.length})`;
+
+        const actions = document.createElement('div');
+        actions.className = 'pgm-group-actions';
+
+        if (mode === 'panel') {
+            const renameBtn = document.createElement('button');
+            renameBtn.textContent = '✏️';
+            renameBtn.title = '重命名';
+            renameBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const newName = prompt('重命名分组：', group.name);
+                if (newName && newName.trim()) {
+                    renameGroup(group.id, newName.trim());
+                    refreshAllViews();
+                }
+            });
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.textContent = '🗑️';
+            deleteBtn.title = '删除分组';
+            deleteBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (confirm(`确定删除分组「${group.name}」吗？\n（人设不会被删除，会回到未分组状态）`)) {
+                    deleteGroup(group.id);
+                    refreshAllViews();
+                }
+            });
+
+            actions.appendChild(renameBtn);
+            actions.appendChild(deleteBtn);
+        }
+
+        header.appendChild(arrow);
+        header.appendChild(nameSpan);
+        header.appendChild(countSpan);
+        header.appendChild(actions);
+
+        header.addEventListener('click', () => {
+            toggleGroupCollapse(group.id, mode === 'quick' ? 'quick' : 'panel');
+            const content = section.querySelector('.pgm-group-content');
+            const arrowEl = section.querySelector('.pgm-group-arrow');
+            if (content) content.classList.toggle('collapsed');
+            if (arrowEl) arrowEl.classList.toggle('collapsed');
+        });
+
+        section.appendChild(header);
+
+        // Content
+        const content = document.createElement('div');
+        content.className = 'pgm-group-content' + (isCollapsed ? ' collapsed' : '');
+
+        if (mode === 'panel') {
+            for (const p of personas) {
+                const el = originalElements?.[p.key];
+                if (el) {
+                    el.style.display = '';
+                    content.appendChild(el);
+                    attachContextMenu(el, p.key);
+                    makeDraggable(el, p.key);
+                }
+            }
+        } else if (mode === 'quick') {
+            const grid = document.createElement('div');
+            grid.className = 'pgm-quick-grid';
+            const currentKey = getCurrentPersonaKey();
+
+            for (const p of personas) {
+                const avatarDiv = createQuickAvatarItem(p, currentKey);
+                grid.appendChild(avatarDiv);
+            }
+            content.appendChild(grid);
+        }
+
+        section.appendChild(content);
+        return section;
+    }
+
+    function attachContextMenu(el, personaKey) {
+        if (el.dataset.pgmContextMenu) return;
+        el.dataset.pgmContextMenu = 'true';
+        el.addEventListener('contextmenu', (e) => {
+            showContextMenu(e, personaKey);
+        });
+    }
+
+    function makeDraggable(el, personaKey) {
+        if (el.dataset.pgmDraggable) return;
+        el.dataset.pgmDraggable = 'true';
+        el.setAttribute('draggable', 'true');
+
+        el.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('text/persona-key', personaKey);
+            el.classList.add('pgm-dragging');
+        });
+
+        el.addEventListener('dragend', () => {
+            el.classList.remove('pgm-dragging');
+            document.querySelectorAll('.pgm-drag-over').forEach(x => x.classList.remove('pgm-drag-over'));
+        });
+    }
+
+    // ========== 位置2：底部快捷弹窗 ==========
+
+    function initQuickPopup() {
+        const sendForm = document.getElementById('send_form');
+        if (!sendForm) {
+            console.warn('[PGM] 未找到 send_form，延迟重试...');
+            setTimeout(initQuickPopup, 2000);
+            return;
+        }
+
+        if (document.getElementById('pgm-quick-btn')) return;
+
+        // 创建按钮
+        const btn = document.createElement('div');
+        btn.id = 'pgm-quick-btn';
+        btn.title = '快速切换人设';
+
+        const btnImg = document.createElement('img');
+        btnImg.id = 'pgm-quick-btn-img';
+        updateQuickBtnAvatar(btnImg);
+        btn.appendChild(btnImg);
+
+        // 通用插入逻辑：尝试多种位置
+        let inserted = false;
+
+        // 尝试1: #send_but_sheld 后面（旧版本）
+        const sendButSheld = document.getElementById('send_but_sheld');
+        if (sendButSheld && !inserted) {
+            sendButSheld.insertAdjacentElement('afterend', btn);
+            inserted = true;
+        }
+
+        // 尝试2: #rightSendForm 开头
+        if (!inserted) {
+            const rightSend = sendForm.querySelector('#rightSendForm, .rightSendForm');
+            if (rightSend) {
+                rightSend.insertBefore(btn, rightSend.firstChild);
+                inserted = true;
+            }
+        }
+
+        // 尝试3: #nonQRFormItems 内部，找到发送按钮附近
+        if (!inserted) {
+            const nonQR = document.getElementById('nonQRFormItems');
+            if (nonQR) {
+                // 找到最后一个按钮类元素，插到它后面
+                const buttons = nonQR.querySelectorAll('[id*="send"], [id*="option"], .fa-wand, [class*="send"]');
+                if (buttons.length > 0) {
+                    const lastBtn = buttons[buttons.length - 1].closest('div') || buttons[buttons.length - 1];
+                    lastBtn.insertAdjacentElement('afterend', btn);
+                    inserted = true;
+                }
+            }
+        }
+
+        // 尝试4: 直接加到 send_form 末尾
+        if (!inserted) {
+            sendForm.appendChild(btn);
+            inserted = true;
+        }
+
+        console.log('[PGM] 快捷按钮已插入, inserted:', inserted);
+
+        // 创建弹窗
+        const overlay = document.createElement('div');
+        overlay.id = 'pgm-quick-overlay';
+        document.body.appendChild(overlay);
+
+        const popup = document.createElement('div');
+        popup.id = 'pgm-quick-popup';
+        document.body.appendChild(popup);
+
+        btn.addEventListener('click', () => {
+            toggleQuickPopup();
+        });
+
+        overlay.addEventListener('click', () => {
+            closeQuickPopup();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && popup.classList.contains('visible')) {
+                closeQuickPopup();
+            }
+        });
+    }
+
+    function updateQuickBtnAvatar(imgEl) {
+        if (!imgEl) imgEl = document.getElementById('pgm-quick-btn-img');
+        if (!imgEl) return;
+
+        const currentKey = getCurrentPersonaKey();
+        if (currentKey) {
+            imgEl.src = getPersonaAvatarUrl(currentKey);
+            imgEl.onerror = () => {
+                // 回退到旧版路径
+                const fallback = getPersonaAvatarFallbackUrl(currentKey);
+                if (imgEl.src !== fallback) {
+                    imgEl.src = fallback;
+                    imgEl.onerror = () => {
+                        imgEl.src = '/img/ai4.png';
+                    };
+                } else {
+                    imgEl.src = '/img/ai4.png';
+                }
+            };
+        } else {
+            imgEl.src = '/img/ai4.png';
+        }
+    }
+
+    function toggleQuickPopup() {
+        const popup = document.getElementById('pgm-quick-popup');
+        const overlay = document.getElementById('pgm-quick-overlay');
+        if (!popup || !overlay) return;
+
+        if (popup.classList.contains('visible')) {
+            closeQuickPopup();
+        } else {
+            renderQuickPopup();
+            popup.classList.add('visible');
+            overlay.classList.add('visible');
+        }
+    }
+
+    function closeQuickPopup() {
+        const popup = document.getElementById('pgm-quick-popup');
+        const overlay = document.getElementById('pgm-quick-overlay');
+        if (popup) popup.classList.remove('visible');
+        if (overlay) overlay.classList.remove('visible');
+    }
+
+    function renderQuickPopup() {
+        const popup = document.getElementById('pgm-quick-popup');
+        if (!popup) return;
+
+        popup.innerHTML = '';
+
+        const searchInput = document.createElement('input');
+        searchInput.className = 'pgm-quick-search';
+        searchInput.type = 'text';
+        searchInput.placeholder = '🔍 搜索人设...';
+        searchInput.addEventListener('input', () => {
+            renderQuickContent(popup, searchInput.value.toLowerCase());
+        });
+        popup.appendChild(searchInput);
+
+        const contentDiv = document.createElement('div');
+        contentDiv.id = 'pgm-quick-content';
+        popup.appendChild(contentDiv);
+
+        renderQuickContent(popup, '');
+    }
+
+    function renderQuickContent(popup, searchTerm) {
+        let contentDiv = popup.querySelector('#pgm-quick-content');
+        if (!contentDiv) return;
+        contentDiv.innerHTML = '';
+
+        let personas = getAllPersonas();
+
+        if (searchTerm) {
+            personas = personas.filter(p =>
+                p.name.toLowerCase().includes(searchTerm) ||
+                p.description.toLowerCase().includes(searchTerm) ||
+                p.key.toLowerCase().includes(searchTerm)
+            );
+        }
+
+        const { groups, grouped, ungrouped } = getPersonasByGroup(personas);
+
+        for (const group of groups) {
+            const personasInGroup = grouped[group.id] || [];
+            if (personasInGroup.length === 0) continue;
+
+            const section = createGroupSection(group, personasInGroup, null, 'quick');
+            contentDiv.appendChild(section);
+        }
+
+        if (ungrouped.length > 0) {
+            if (groups.some(g => (grouped[g.id] || []).length > 0)) {
+                const separator = document.createElement('div');
+                separator.className = 'pgm-ungrouped-separator';
+                separator.textContent = '未分组';
+                contentDiv.appendChild(separator);
+            }
+
+            const grid = document.createElement('div');
+            grid.className = 'pgm-quick-grid';
+            const currentKey = getCurrentPersonaKey();
+
+            for (const p of ungrouped) {
+                const avatarDiv = createQuickAvatarItem(p, currentKey);
+                grid.appendChild(avatarDiv);
+            }
+            contentDiv.appendChild(grid);
+        }
+
+        if (personas.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.cssText = 'text-align:center;padding:20px;color:var(--SmartThemeQuoteColor,#888);font-size:13px;';
+            empty.textContent = searchTerm ? '没有找到匹配的人设' : '暂无人设';
+            contentDiv.appendChild(empty);
+        }
+    }
+
+    function createQuickAvatarItem(persona, currentKey) {
+        const avatarDiv = document.createElement('div');
+        avatarDiv.className = 'pgm-quick-avatar' + (persona.key === currentKey ? ' active' : '');
+        avatarDiv.title = persona.name + (persona.description ? '\n' + truncateText(persona.description, 80) : '');
+
+        const img = document.createElement('img');
+        img.src = persona.avatarUrl || getPersonaAvatarUrl(persona.key);
+        img.loading = 'lazy';
+        img.onerror = () => {
+            const fallback = getPersonaAvatarFallbackUrl(persona.key);
+            if (img.src !== fallback) {
+                img.src = fallback;
+                img.onerror = () => { img.src = '/img/ai4.png'; };
+            } else {
+                img.src = '/img/ai4.png';
+            }
+        };
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'pgm-quick-avatar-name';
+        nameSpan.textContent = persona.name;
+
+        avatarDiv.appendChild(img);
+        avatarDiv.appendChild(nameSpan);
+
+        avatarDiv.addEventListener('click', () => {
+            switchPersona(persona.key);
+            closeQuickPopup();
+            setTimeout(() => updateQuickBtnAvatar(), 300);
+        });
+
+        avatarDiv.addEventListener('contextmenu', (e) => {
+            showContextMenu(e, persona.key);
+        });
+
+        return avatarDiv;
+    }
+
+    // ========== 刷新所有视图 ==========
+
+    function refreshAllViews() {
+        const panel = findPersonaPanel();
+        if (panel) {
+            panel.dataset.pgmEnhanced = 'false';
+            enhancePanel();
+        }
+
+        const popup = document.getElementById('pgm-quick-popup');
+        if (popup && popup.classList.contains('visible')) {
+            const searchInput = popup.querySelector('.pgm-quick-search');
+            renderQuickContent(popup, searchInput?.value?.toLowerCase() || '');
+        }
+
+        updateQuickBtnAvatar();
+    }
+
+    // ========== 初始化 ==========
+
+    function init() {
+        // 防止重复初始化
+        if (window._pgmInitialized) return;
+        window._pgmInitialized = true;
+
+        console.log('[PGM] Persona Group Manager 初始化...');
+
+        getSettings();
+
+        initPanelEnhancement();
+        initQuickPopup();
+
+        // 监听事件
+        try {
+            const ctx = getContext();
+            const eventSource = ctx.eventSource;
+            if (eventSource) {
+                const possibleEvents = [
+                    'persona_updated',
+                    'PERSONA_UPDATED',
+                    'settings_updated',
+                ];
+                for (const eventName of possibleEvents) {
+                    try {
+                        eventSource.on(eventName, () => {
+                            setTimeout(refreshAllViews, 200);
+                        });
+                    } catch (e) { /* ignore */ }
+                }
+            }
+        } catch (e) {
+            console.warn('[PGM] 事件监听注册失败:', e);
+        }
+
+        console.log('[PGM] Persona Group Manager 初始化完成！');
+    }
+
+    // 启动：多重保险
+    function tryInit() {
+        try {
+            // 确认 ST 已就绪
+            const ctx = getContext();
+            if (ctx) {
+                init();
+                return;
+            }
+        } catch (e) { /* ST 还没准备好 */ }
+        setTimeout(tryInit, 1000);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => setTimeout(tryInit, 1500));
+    } else {
+        setTimeout(tryInit, 1500);
+    }
+
+    if (typeof jQuery !== 'undefined') {
+        jQuery(async () => {
+            setTimeout(tryInit, 2000);
+        });
+    }
+
+})();
                     });
                 }
             }
