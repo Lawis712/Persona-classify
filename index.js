@@ -1,39 +1,73 @@
-/**
- * Persona Group Manager v1.1
- * SillyTavern 第三方扩展 - 用户人设分组管理
- * 兼容 ST 1.12.4 ~ 1.17+
- */
-(function () {
-    'use strict';
+import { extension_settings, getContext } from '../../../extensions.js';
+import { eventSource, event_types, saveSettingsDebounced } from '../../../../script.js';
+import { power_user } from '../../../power-user.js';
 
-    // ============================
-    //  常量
-    // ============================
-    const EXTENSION_NAME = 'persona-group-manager';
-    const SETTINGS_KEY = 'personaGroupManager';
-    const LOG_PREFIX = '[PGM]';
-    let initialized = false;
+import { initStorage, getGroups, saveGroups } from './src/storage.js';
+import { initMainPanel, refreshMainPanel } from './src/panel-main.js';
+import { initQuickPanel, refreshQuickPanel } from './src/panel-quick.js';
 
-    // ============================
-    //  日志
-    // ============================
-    function log(...args) {
-        console.log(LOG_PREFIX, ...args);
+const EXT_ID = 'SillyTavern-PersonaGroups';
+const EXT_NAME = 'Persona Groups';
+
+// 检测 Quick Persona 是否启用
+function isQuickPersonaEnabled() {
+    try {
+        // Quick Persona 扩展的设置键
+        const qp = extension_settings.quickPersona;
+        return qp && qp.enabled === true;
+    } catch (e) {
+        return false;
     }
-    function warn(...args) {
-        console.warn(LOG_PREFIX, ...args);
-    }
-    function error(...args)/**
- * Persona Group Manager v1.1
- * SillyTavern 第三方扩展 - 用户人设分组管理
- * 兼容 ST 1.12.4 ~ 1.17+
- */
-(function () {
-    'use strict';
+}
 
-    // ============================
-    //  常量
-    // ============================
+jQuery(async () => {
+    console.log(`[${EXT_NAME}] Loading...`);
+
+    // 1. 初始化存储
+    initStorage();
+
+    // 2. 初始化主面板（位置1：用户设定）
+    try {
+        initMainPanel();
+    } catch (err) {
+        console.error(`[${EXT_NAME}] Main panel init failed:`, err);
+    }
+
+    // 3. 初始化快捷弹窗（位置2：底栏）
+    if (isQuickPersonaEnabled()) {
+        toastr.warning(
+            'Persona Groups 检测到 Quick Persona 已启用，快捷弹窗已禁用。请二选一。',
+            'Persona Groups'
+        );
+    } else {
+        try {
+            initQuickPanel();
+        } catch (err) {
+            console.error(`[${EXT_NAME}] Quick panel init failed:`, err);
+        }
+    }
+
+    // 4. 监听 persona 变化，刷新两个面板
+    const refreshAll = () => {
+        refreshMainPanel();
+        refreshQuickPanel();
+    };
+
+    eventSource.on(event_types.SETTINGS_UPDATED, refreshAll);
+    // ST 在切换/编辑 persona 后没有专门事件，监听通用事件
+    eventSource.on(event_types.CHAT_CHANGED, refreshAll);
+
+    // 监听原生头像列表的 DOM 变化（新增/删除 persona 时）
+    const observerTarget = document.getElementById('user_avatar_block');
+    if (observerTarget) {
+        const observer = new MutationObserver(() => {
+            refreshAll();
+        });
+        observer.observe(observerTarget, { childList: true });
+    }
+
+    console.log(`[${EXT_NAME}] Loaded.`);
+});
     const EXTENSION_NAME = 'persona-group-manager';
     const SETTINGS_KEY = 'personaGroupManager';
     const LOG_PREFIX = '[PGM]';
