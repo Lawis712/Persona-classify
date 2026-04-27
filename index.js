@@ -1,65 +1,821 @@
 // Persona Group Manager - SillyTavern Extension
 // 兼容 ST 1.12.4 ~ 1.17+
+'use strict';
 
-(function () {
-    'use strict';
+const PGM_EXTENSION_NAME = 'persona-group-manager';
+const PGM_SETTINGS_KEY = 'personaGroupManager';
+let pgm_currentFilter = 'all';
 
-    const EXTENSION_NAME = 'persona-group-manager';
-    const SETTINGS_KEY = 'personaGroupManager';
+// ========== 工具函数 ==========
 
-    // ========== 工具函数 ==========
+function pgm_getContext() {
+    return window.SillyTavern?.getContext?.() || SillyTavern.getContext();
+}
 
-    function getContext() {
-        return window.SillyTavern?.getContext?.() || SillyTavern.getContext();
+function pgm_getPowerUser() {
+    try {
+        const ctx = pgm_getContext();
+        if (ctx.powerUserSettings?.personas) return ctx.powerUserSettings;
+    } catch (e) { /* ignore */ }
+    try {
+        if (typeof power_user !== 'undefined' && power_user?.personas) return power_user;
+    } catch (e) { /* ignore */ }
+    return null;
+}
+
+function pgm_getDefaultSettings() {
+    return {
+        groups: [],
+        personaGroupMap: {},
+        quickCollapsed: {},
+        version: 1,
+    };
+}
+
+function pgm_getSettings() {
+    const context = pgm_getContext();
+    if (!context.extensionSettings[PGM_SETTINGS_KEY]) {
+        context.extensionSettings[PGM_SETTINGS_KEY] = pgm_getDefaultSettings();
     }
+    return context.extensionSettings[PGM_SETTINGS_KEY];
+}
 
-    /**
-     * 兼容获取 power_user 对象
-     * 不同 ST 版本存放位置不同
-     */
-    function getPowerUser() {
-        try {
-            // 全局变量（旧版本）
-            if (typeof power_user !== 'undefined' && power_user?.personas) {
-                return power_user;
+function pgm_saveSettings() {
+    pgm_getContext().saveSettingsDebounced();
+}
+
+function pgm_generateId() {
+    return 'g_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+// ========== Persona 数据获取 ==========
+
+function pgm_getAllPersonas() {
+    const result = [];
+    const seen = new Set();
+    try {
+        const pu = pgm_getPowerUser();
+
+        // 方案1：从 powerUserSettings 获取
+        if (pu && pu.personas && Object.keys(pu.personas).length > 0) {
+            for (const [key, name] of Object.entries(pu.personas)) {
+                if (seen.has(key)) continue;
+                seen.add(key);
+                const descObj = pu.persona_descriptions?.[key];
+                const description = typeof descObj === 'object' ? descObj.description : (descObj || '');
+                result.push({
+                    key,
+                    name: name || key,
+                    description: description || '',
+                    bound: pgm_isPersonaBound(key),
+                    avatarUrl: pgm_getPersonaAvatarUrl(key),
+                });
             }
-        } catch (e) { /* ignore */ }
-
-        try {
-            // context.powerUserSettings（新版本）
-            const ctx = getContext();
-            if (ctx.powerUserSettings?.personas) {
-                return ctx.powerUserSettings;
-            }
-        } catch (e) { /* ignore */ }
-
-        return null;
-    }
-
-    function getDefaultSettings() {
-        return {
-            groups: [],          // [{ id, name, order, collapsed }]
-            personaGroupMap: {}, // { personaKey: groupId }
-            quickCollapsed: {},  // { groupId: bool }
-            version: 1,
-        };
-    }
-
-    function getSettings() {
-        const context = getContext();
-        if (!context.extensionSettings[SETTINGS_KEY]) {
-            context.extensionSettings[SETTINGS_KEY] = getDefaultSettings();
         }
-        return context.extensionSettings[SETTINGS_KEY];
+
+        // 方案2：DOM 抓取
+        if (result.length === 0) {
+            const avatarBlock = document.getElementById('user_avatar_block');
+            if (avatarBlock) {
+                avatarBlock.querySelectorAll('.avatar-container').forEach(el => {
+                    const key = pgm_getPersonaKeyFromElement(el);
+                    if (!key || seen.has(key)) return;
+                    seen.add(key);
+
+                    let name = '';
+                    for (const sel of ['.character_name_block span', '.ch_name', '.avatar-name', '.character_name_block']) {
+                        const nameEl = el.querySelector(sel);
+                        if (nameEl) { name = nameEl.textContent?.trim(); if (name) break; }
+                    }
+                    if (!name) name = key.replace(/\.[^.]+$/, '');
+
+                    const img = el.querySelector('img');
+                    const avatarUrl = img?.getAttribute('src') || pgm_getPersonaAvatarUrl(key);
+
+                    result.push({ key, name, description: '', bound: pgm_isPersonaBound(key), avatarUrl });
+                });
+            }
+        }
+
+        console.log('[PGM] 检测到人设数量:', result.length);
+    } catch (e) {
+        console.error('[PGM] getAllPersonas error:', e);
+    }
+    return result;
+}
+
+function pgm_isPersonaBound(personaKey) {
+    try {
+        const pu = pgm_getPowerUser();
+        if (!pu) return false;
+        if (pu.persona_bind && typeof pu.persona_bind === 'object') {
+            return Object.values(pu.persona_bind).includes(personaKey);
+        }
+        return false;
+    } catch (e) { return false; }
+}
+
+function pgm_getPersonaAvatarUrl(key) {
+    return `/thumbnail?type=persona&file=${encodeURIComponent(key)}`;
+}
+
+function pgm_getPersonaAvatarFallbackUrl(key) {
+    return `/User Avatars/${encodeURIComponent(key)}`;
+}
+
+function pgm_getCurrentPersonaKey() {
+    try {
+        const pu = pgm_getPowerUser();
+        if (pu?.user_avatar) return pu.user_avatar;
+        const activeEl = document.querySelector('#user_avatar_block .avatar-container.selected, #user_avatar_block .avatar-container.active');
+        if (activeEl) return pgm_getPersonaKeyFromElement(activeEl);
+        return '';
+    } catch (e) { return ''; }
+}
+
+function pgm_switchPersona(personaKey) {
+    try {
+        if (typeof setUserAvatar === 'function') { setUserAvatar(personaKey); return; }
+        const avatarBlock = document.getElementById('user_avatar_block');
+        if (avatarBlock) {
+            for (const el of avatarBlock.querySelectorAll('.avatar-container')) {
+                if (pgm_getPersonaKeyFromElement(el) === personaKey) { el.click(); return; }
+            }
+        }
+        const ctx = pgm_getContext();
+        if (ctx.executeSlashCommands) { ctx.executeSlashCommands(`/persona ${personaKey}`); return; }
+        if (typeof executeSlashCommands === 'function') { executeSlashCommands(`/persona ${personaKey}`); }
+    } catch (e) { console.error('[PGM] switchPersona error:', e); }
+}
+
+function pgm_truncateText(text, maxLen) {
+    if (!text) return '';
+    return text.length > maxLen ? text.substring(0, maxLen) + '...' : text;
+}
+
+function pgm_getPersonaKeyFromElement(el) {
+    if (!el) return '';
+
+    const avatarId = el.getAttribute('data-avatar-id') || el.dataset?.avatarId;
+    if (avatarId) return avatarId;
+
+    const innerAvatar = el.querySelector('[data-avatar-id]');
+    if (innerAvatar) { const id = innerAvatar.getAttribute('data-avatar-id'); if (id) return id; }
+
+    const imgFile = el.getAttribute('imgfile');
+    if (imgFile) return imgFile;
+    const innerImgFile = el.querySelector('[imgfile]');
+    if (innerImgFile) return innerImgFile.getAttribute('imgfile');
+
+    if (el.dataset?.persona) return el.dataset.persona;
+
+    const img = el.querySelector('img');
+    if (img) {
+        const src = decodeURIComponent(img.getAttribute('src') || '');
+        const thumbMatch = src.match(/[?&]file=([^&#]+)/i);
+        if (thumbMatch) return decodeURIComponent(thumbMatch[1]);
+        const directMatch = src.match(/(?:User\s*Avatars|avatars)\/([^?#]+)/i);
+        if (directMatch) return decodeURIComponent(directMatch[1]);
     }
 
-    function saveSettings() {
-        const context = getContext();
-        context.saveSettingsDebounced();
+    const title = el.getAttribute('title');
+    if (title) return title;
+
+    const nameEl = el.querySelector('.character_name_block span, .ch_name, .avatar-name');
+    if (nameEl) {
+        const name = nameEl.textContent?.trim();
+        const pu = pgm_getPowerUser();
+        if (pu?.personas && name) {
+            for (const [k, v] of Object.entries(pu.personas)) { if (v === name) return k; }
+        }
+    }
+    return '';
+}
+
+// ========== 分组数据操作 ==========
+
+function pgm_getGroups() {
+    const settings = pgm_getSettings();
+    return [...settings.groups].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+}
+
+function pgm_addGroup(name) {
+    const settings = pgm_getSettings();
+    const group = { id: pgm_generateId(), name, order: settings.groups.length, collapsed: false };
+    settings.groups.push(group);
+    pgm_saveSettings();
+    return group;
+}
+
+function pgm_renameGroup(groupId, newName) {
+    const settings = pgm_getSettings();
+    const group = settings.groups.find(g => g.id === groupId);
+    if (group) { group.name = newName; pgm_saveSettings(); }
+}
+
+function pgm_deleteGroup(groupId) {
+    const settings = pgm_getSettings();
+    settings.groups = settings.groups.filter(g => g.id !== groupId);
+    for (const [key, gid] of Object.entries(settings.personaGroupMap)) {
+        if (gid === groupId) delete settings.personaGroupMap[key];
+    }
+    pgm_saveSettings();
+}
+
+function pgm_toggleGroupCollapse(groupId, target) {
+    const settings = pgm_getSettings();
+    if (target === 'quick') {
+        if (!settings.quickCollapsed) settings.quickCollapsed = {};
+        settings.quickCollapsed[groupId] = !settings.quickCollapsed[groupId];
+    } else {
+        const group = settings.groups.find(g => g.id === groupId);
+        if (group) group.collapsed = !group.collapsed;
+    }
+    pgm_saveSettings();
+}
+
+function pgm_setPersonaGroup(personaKey, groupId) {
+    const settings = pgm_getSettings();
+    if (groupId) { settings.personaGroupMap[personaKey] = groupId; }
+    else { delete settings.personaGroupMap[personaKey]; }
+    pgm_saveSettings();
+}
+
+function pgm_getPersonasByGroup(personas) {
+    const settings = pgm_getSettings();
+    const groups = pgm_getGroups();
+    const grouped = {};
+    const ungrouped = [];
+    for (const g of groups) grouped[g.id] = [];
+    for (const p of personas) {
+        const gid = settings.personaGroupMap[p.key];
+        if (gid && grouped[gid]) grouped[gid].push(p);
+        else ungrouped.push(p);
+    }
+    return { groups, grouped, ungrouped };
+}
+
+// ========== 右键菜单 ==========
+
+function pgm_showContextMenu(e, personaKey) {
+    e.preventDefault();
+    pgm_removeContextMenu();
+
+    const settings = pgm_getSettings();
+    const groups = pgm_getGroups();
+    const currentGroup = settings.personaGroupMap[personaKey] || null;
+
+    const menu = document.createElement('div');
+    menu.className = 'pgm-context-menu';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+
+    const title = document.createElement('div');
+    title.className = 'pgm-context-menu-item';
+    title.style.cssText = 'font-weight:bold;cursor:default;opacity:0.6;font-size:11px;';
+    title.textContent = '移动到分组';
+    menu.appendChild(title);
+
+    const d1 = document.createElement('div');
+    d1.className = 'pgm-context-menu-divider';
+    menu.appendChild(d1);
+
+    for (const g of groups) {
+        const item = document.createElement('div');
+        item.className = 'pgm-context-menu-item';
+        item.textContent = (currentGroup === g.id ? '✓ ' : '　') + g.name;
+        item.addEventListener('click', () => {
+            pgm_setPersonaGroup(personaKey, g.id);
+            pgm_removeContextMenu();
+            pgm_refreshAllViews();
+        });
+        menu.appendChild(item);
     }
 
-    function generateId() {
-        return 'g_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    if (currentGroup) {
+        const d2 = document.createElement('div');
+        d2.className = 'pgm-context-menu-divider';
+        menu.appendChild(d2);
+        const removeItem = document.createElement('div');
+        removeItem.className = 'pgm-context-menu-item';
+        removeItem.textContent = '✕ 移出分组';
+        removeItem.addEventListener('click', () => {
+            pgm_setPersonaGroup(personaKey, null);
+            pgm_removeContextMenu();
+            pgm_refreshAllViews();
+        });
+        menu.appendChild(removeItem);
+    }
+
+    const d3 = document.createElement('div');
+    d3.className = 'pgm-context-menu-divider';
+    menu.appendChild(d3);
+    const newGroupItem = document.createElement('div');
+    newGroupItem.className = 'pgm-context-menu-item';
+    newGroupItem.textContent = '+ 新建分组并移入';
+    newGroupItem.addEventListener('click', () => {
+        pgm_removeContextMenu();
+        const name = prompt('输入分组名称：');
+        if (name?.trim()) {
+            const group = pgm_addGroup(name.trim());
+            pgm_setPersonaGroup(personaKey, group.id);
+            pgm_refreshAllViews();
+        }
+    });
+    menu.appendChild(newGroupItem);
+
+    document.body.appendChild(menu);
+
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 5) + 'px';
+    if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 5) + 'px';
+
+    setTimeout(() => document.addEventListener('click', pgm_removeContextMenu, { once: true }), 0);
+}
+
+function pgm_removeContextMenu() {
+    document.querySelectorAll('.pgm-context-menu').forEach(el => el.remove());
+}
+
+// ========== 位置1：管理面板增强 ==========
+
+function pgm_initPanelEnhancement() {
+    const observer = new MutationObserver(() => {
+        const panel = pgm_findPersonaPanel();
+        if (panel && !panel.dataset.pgmEnhanced) {
+            setTimeout(() => pgm_enhancePanel(), 150);
+        }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    setInterval(() => {
+        const panel = pgm_findPersonaPanel();
+        if (panel && !panel.dataset.pgmEnhanced) pgm_enhancePanel();
+    }, 1500);
+}
+
+function pgm_findPersonaPanel() {
+    return document.querySelector('#user_avatar_block')
+        || document.querySelector('.persona_manager')
+        || document.querySelector('#persona-management-block');
+}
+
+function pgm_findPersonaListContainer() {
+    const panel = pgm_findPersonaPanel();
+    if (!panel) return null;
+    const avatarContainers = panel.querySelectorAll('.avatar-container');
+    if (avatarContainers.length > 0) return avatarContainers[0].parentElement;
+    return panel;
+}
+
+function pgm_enhancePanel() {
+    const panel = pgm_findPersonaPanel();
+    if (!panel) return;
+    const listContainer = pgm_findPersonaListContainer();
+    if (!listContainer) return;
+
+    if (panel.dataset.pgmEnhanced === 'true') { pgm_refreshPanelView(); return; }
+    panel.dataset.pgmEnhanced = 'true';
+    pgm_injectPanelControls(listContainer);
+    pgm_refreshPanelView();
+}
+
+function pgm_injectPanelControls(listContainer) {
+    if (document.getElementById('pgm-panel-controls')) return;
+
+    const controlsDiv = document.createElement('div');
+    controlsDiv.id = 'pgm-panel-controls';
+
+    for (const f of [{ key: 'all', label: '全部' }, { key: 'bound', label: '已绑定' }, { key: 'unbound', label: '未绑定' }]) {
+        const btn = document.createElement('button');
+        btn.className = 'pgm-filter-btn' + (pgm_currentFilter === f.key ? ' active' : '');
+        btn.textContent = f.label;
+        btn.addEventListener('click', () => {
+            pgm_currentFilter = f.key;
+            controlsDiv.querySelectorAll('.pgm-filter-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            pgm_refreshPanelView();
+        });
+        controlsDiv.appendChild(btn);
+    }
+
+    const addBtn = document.createElement('button');
+    addBtn.id = 'pgm-add-group-btn';
+    addBtn.textContent = '+ 新建分组';
+    addBtn.addEventListener('click', () => {
+        const name = prompt('输入分组名称：');
+        if (name?.trim()) { pgm_addGroup(name.trim()); pgm_refreshAllViews(); }
+    });
+    controlsDiv.appendChild(addBtn);
+
+    listContainer.parentNode.insertBefore(controlsDiv, listContainer);
+}
+
+function pgm_refreshPanelView() {
+    const listContainer = pgm_findPersonaListContainer();
+    if (!listContainer) return;
+
+    let personas = pgm_getAllPersonas();
+    if (pgm_currentFilter === 'bound') personas = personas.filter(p => p.bound);
+    else if (pgm_currentFilter === 'unbound') personas = personas.filter(p => !p.bound);
+
+    const { groups, grouped, ungrouped } = pgm_getPersonasByGroup(personas);
+
+    const originalElements = {};
+    listContainer.querySelectorAll('.avatar-container').forEach(el => {
+        const key = pgm_getPersonaKeyFromElement(el);
+        if (key) originalElements[key] = el;
+    });
+
+    listContainer.querySelectorAll('.avatar-container').forEach(el => el.style.display = 'none');
+    listContainer.querySelectorAll('.pgm-group-section, .pgm-ungrouped-separator, .pgm-ungrouped-wrapper').forEach(el => el.remove());
+
+    const groupsReversed = [...groups].reverse();
+    for (const group of groupsReversed) {
+        const personasInGroup = grouped[group.id] || [];
+        if (personasInGroup.length === 0) continue;
+        const section = pgm_createGroupSection(group, personasInGroup, originalElements, 'panel');
+        listContainer.insertBefore(section, listContainer.firstChild);
+    }
+
+    if (ungrouped.length > 0) {
+        if (groups.some(g => (grouped[g.id] || []).length > 0)) {
+            const sep = document.createElement('div');
+            sep.className = 'pgm-ungrouped-separator';
+            sep.textContent = '未分组';
+            listContainer.appendChild(sep);
+        }
+        const wrapper = document.createElement('div');
+        wrapper.className = 'pgm-ungrouped-wrapper';
+        for (const p of ungrouped) {
+            const el = originalElements[p.key];
+            if (el) { el.style.display = ''; wrapper.appendChild(el); pgm_attachContextMenu(el, p.key); }
+        }
+        listContainer.appendChild(wrapper);
+    }
+}
+
+function pgm_createGroupSection(group, personas, originalElements, mode) {
+    const section = document.createElement('div');
+    section.className = 'pgm-group-section';
+    section.dataset.groupId = group.id;
+
+    section.addEventListener('dragover', (e) => { e.preventDefault(); section.classList.add('pgm-drag-over'); });
+    section.addEventListener('dragleave', () => section.classList.remove('pgm-drag-over'));
+    section.addEventListener('drop', (e) => {
+        e.preventDefault();
+        section.classList.remove('pgm-drag-over');
+        const pk = e.dataTransfer.getData('text/persona-key');
+        if (pk) { pgm_setPersonaGroup(pk, group.id); pgm_refreshAllViews(); }
+    });
+
+    const header = document.createElement('div');
+    header.className = 'pgm-group-header';
+
+    const isCollapsed = mode === 'quick' ? (pgm_getSettings().quickCollapsed?.[group.id] || false) : group.collapsed;
+
+    const arrow = document.createElement('span');
+    arrow.className = 'pgm-group-arrow' + (isCollapsed ? ' collapsed' : '');
+    arrow.textContent = '▼';
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'pgm-group-name';
+    nameSpan.textContent = group.name;
+
+    const countSpan = document.createElement('span');
+    countSpan.className = 'pgm-group-count';
+    countSpan.textContent = `(${personas.length})`;
+
+    const actions = document.createElement('div');
+    actions.className = 'pgm-group-actions';
+
+    if (mode === 'panel') {
+        const renameBtn = document.createElement('button');
+        renameBtn.textContent = '✏️';
+        renameBtn.title = '重命名';
+        renameBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const newName = prompt('重命名分组：', group.name);
+            if (newName?.trim()) { pgm_renameGroup(group.id, newName.trim()); pgm_refreshAllViews(); }
+        });
+        const deleteBtn = document.createElement('button');
+        deleteBtn.textContent = '🗑️';
+        deleteBtn.title = '删除分组';
+        deleteBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (confirm(`确定删除分组「${group.name}」吗？\n（人设不会被删除，会回到未分组状态）`)) {
+                pgm_deleteGroup(group.id); pgm_refreshAllViews();
+            }
+        });
+        actions.appendChild(renameBtn);
+        actions.appendChild(deleteBtn);
+    }
+
+    header.appendChild(arrow);
+    header.appendChild(nameSpan);
+    header.appendChild(countSpan);
+    header.appendChild(actions);
+
+    header.addEventListener('click', () => {
+        pgm_toggleGroupCollapse(group.id, mode === 'quick' ? 'quick' : 'panel');
+        const content = section.querySelector('.pgm-group-content');
+        const arrowEl = section.querySelector('.pgm-group-arrow');
+        if (content) content.classList.toggle('collapsed');
+        if (arrowEl) arrowEl.classList.toggle('collapsed');
+    });
+
+    section.appendChild(header);
+
+    const content = document.createElement('div');
+    content.className = 'pgm-group-content' + (isCollapsed ? ' collapsed' : '');
+
+    if (mode === 'panel') {
+        for (const p of personas) {
+            const el = originalElements?.[p.key];
+            if (el) {
+                el.style.display = '';
+                content.appendChild(el);
+                pgm_attachContextMenu(el, p.key);
+                pgm_makeDraggable(el, p.key);
+            }
+        }
+    } else if (mode === 'quick') {
+        const grid = document.createElement('div');
+        grid.className = 'pgm-quick-grid';
+        const currentKey = pgm_getCurrentPersonaKey();
+        for (const p of personas) grid.appendChild(pgm_createQuickAvatarItem(p, currentKey));
+        content.appendChild(grid);
+    }
+
+    section.appendChild(content);
+    return section;
+}
+
+function pgm_attachContextMenu(el, personaKey) {
+    if (el.dataset.pgmContextMenu) return;
+    el.dataset.pgmContextMenu = 'true';
+    el.addEventListener('contextmenu', (e) => pgm_showContextMenu(e, personaKey));
+}
+
+function pgm_makeDraggable(el, personaKey) {
+    if (el.dataset.pgmDraggable) return;
+    el.dataset.pgmDraggable = 'true';
+    el.setAttribute('draggable', 'true');
+    el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/persona-key', personaKey); el.classList.add('pgm-dragging'); });
+    el.addEventListener('dragend', () => { el.classList.remove('pgm-dragging'); document.querySelectorAll('.pgm-drag-over').forEach(x => x.classList.remove('pgm-drag-over')); });
+}
+
+// ========== 位置2：底部快捷弹窗 ==========
+
+function pgm_initQuickPopup() {
+    const sendForm = document.getElementById('send_form');
+    if (!sendForm) {
+        console.warn('[PGM] 未找到 send_form，延迟重试...');
+        setTimeout(pgm_initQuickPopup, 2000);
+        return;
+    }
+
+    if (document.getElementById('pgm-quick-btn')) return;
+
+    const btn = document.createElement('div');
+    btn.id = 'pgm-quick-btn';
+    btn.title = '快速切换人设';
+
+    const btnImg = document.createElement('img');
+    btnImg.id = 'pgm-quick-btn-img';
+    pgm_updateQuickBtnAvatar(btnImg);
+    btn.appendChild(btnImg);
+
+    // 通用插入逻辑：插到魔法棒右边
+    let inserted = false;
+
+    // 尝试1: 找魔法棒按钮，插到它后面
+    const wandBtn = document.getElementById('extensionsMenuButton');
+    if (wandBtn && !inserted) {
+        wandBtn.insertAdjacentElement('afterend', btn);
+        inserted = true;
+        console.log('[PGM] 按钮插入到魔法棒右边');
+    }
+
+    // 尝试2: #leftSendForm 末尾
+    if (!inserted) {
+        const leftSend = document.getElementById('leftSendForm');
+        if (leftSend) { leftSend.appendChild(btn); inserted = true; console.log('[PGM] 按钮插入到 leftSendForm 末尾'); }
+    }
+
+    // 尝试3: #rightSendForm 开头
+    if (!inserted) {
+        const rightSend = document.getElementById('rightSendForm');
+        if (rightSend) { rightSend.insertBefore(btn, rightSend.firstChild); inserted = true; }
+    }
+
+    // 尝试4: send_form 末尾
+    if (!inserted) {
+        sendForm.appendChild(btn);
+        inserted = true;
+    }
+
+    console.log('[PGM] 快捷按钮已创建');
+
+    // 创建弹窗
+    const overlay = document.createElement('div');
+    overlay.id = 'pgm-quick-overlay';
+    document.body.appendChild(overlay);
+
+    const popup = document.createElement('div');
+    popup.id = 'pgm-quick-popup';
+    document.body.appendChild(popup);
+
+    btn.addEventListener('click', () => pgm_toggleQuickPopup());
+    overlay.addEventListener('click', () => pgm_closeQuickPopup());
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && popup.classList.contains('visible')) pgm_closeQuickPopup();
+    });
+}
+
+function pgm_updateQuickBtnAvatar(imgEl) {
+    if (!imgEl) imgEl = document.getElementById('pgm-quick-btn-img');
+    if (!imgEl) return;
+    const currentKey = pgm_getCurrentPersonaKey();
+    if (currentKey) {
+        imgEl.src = pgm_getPersonaAvatarUrl(currentKey);
+        imgEl.onerror = () => {
+            const fb = pgm_getPersonaAvatarFallbackUrl(currentKey);
+            if (imgEl.src !== fb) { imgEl.src = fb; imgEl.onerror = () => { imgEl.src = '/img/ai4.png'; }; }
+            else imgEl.src = '/img/ai4.png';
+        };
+    } else {
+        imgEl.src = '/img/ai4.png';
+    }
+}
+
+function pgm_toggleQuickPopup() {
+    const popup = document.getElementById('pgm-quick-popup');
+    const overlay = document.getElementById('pgm-quick-overlay');
+    if (!popup || !overlay) return;
+    if (popup.classList.contains('visible')) { pgm_closeQuickPopup(); }
+    else { pgm_renderQuickPopup(); popup.classList.add('visible'); overlay.classList.add('visible'); }
+}
+
+function pgm_closeQuickPopup() {
+    document.getElementById('pgm-quick-popup')?.classList.remove('visible');
+    document.getElementById('pgm-quick-overlay')?.classList.remove('visible');
+}
+
+function pgm_renderQuickPopup() {
+    const popup = document.getElementById('pgm-quick-popup');
+    if (!popup) return;
+    popup.innerHTML = '';
+
+    const searchInput = document.createElement('input');
+    searchInput.className = 'pgm-quick-search';
+    searchInput.type = 'text';
+    searchInput.placeholder = '🔍 搜索人设...';
+    searchInput.addEventListener('input', () => pgm_renderQuickContent(popup, searchInput.value.toLowerCase()));
+    popup.appendChild(searchInput);
+
+    const contentDiv = document.createElement('div');
+    contentDiv.id = 'pgm-quick-content';
+    popup.appendChild(contentDiv);
+    pgm_renderQuickContent(popup, '');
+}
+
+function pgm_renderQuickContent(popup, searchTerm) {
+    const contentDiv = popup.querySelector('#pgm-quick-content');
+    if (!contentDiv) return;
+    contentDiv.innerHTML = '';
+
+    let personas = pgm_getAllPersonas();
+    if (searchTerm) {
+        personas = personas.filter(p =>
+            p.name.toLowerCase().includes(searchTerm) ||
+            p.description.toLowerCase().includes(searchTerm) ||
+            p.key.toLowerCase().includes(searchTerm)
+        );
+    }
+
+    const { groups, grouped, ungrouped } = pgm_getPersonasByGroup(personas);
+
+    for (const group of groups) {
+        const pigs = grouped[group.id] || [];
+        if (pigs.length === 0) continue;
+        contentDiv.appendChild(pgm_createGroupSection(group, pigs, null, 'quick'));
+    }
+
+    if (ungrouped.length > 0) {
+        if (groups.some(g => (grouped[g.id] || []).length > 0)) {
+            const sep = document.createElement('div');
+            sep.className = 'pgm-ungrouped-separator';
+            sep.textContent = '未分组';
+            contentDiv.appendChild(sep);
+        }
+        const grid = document.createElement('div');
+        grid.className = 'pgm-quick-grid';
+        const currentKey = pgm_getCurrentPersonaKey();
+        for (const p of ungrouped) grid.appendChild(pgm_createQuickAvatarItem(p, currentKey));
+        contentDiv.appendChild(grid);
+    }
+
+    if (personas.length === 0) {
+        const empty = document.createElement('div');
+        empty.style.cssText = 'text-align:center;padding:20px;color:var(--SmartThemeQuoteColor,#888);font-size:13px;';
+        empty.textContent = searchTerm ? '没有找到匹配的人设' : '暂无人设';
+        contentDiv.appendChild(empty);
+    }
+}
+
+function pgm_createQuickAvatarItem(persona, currentKey) {
+    const avatarDiv = document.createElement('div');
+    avatarDiv.className = 'pgm-quick-avatar' + (persona.key === currentKey ? ' active' : '');
+    avatarDiv.title = persona.name + (persona.description ? '\n' + pgm_truncateText(persona.description, 80) : '');
+
+    const img = document.createElement('img');
+    img.src = persona.avatarUrl || pgm_getPersonaAvatarUrl(persona.key);
+    img.loading = 'lazy';
+    img.onerror = () => {
+        const fb = pgm_getPersonaAvatarFallbackUrl(persona.key);
+        if (img.src !== fb) { img.src = fb; img.onerror = () => { img.src = '/img/ai4.png'; }; }
+        else img.src = '/img/ai4.png';
+    };
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'pgm-quick-avatar-name';
+    nameSpan.textContent = persona.name;
+
+    avatarDiv.appendChild(img);
+    avatarDiv.appendChild(nameSpan);
+
+    avatarDiv.addEventListener('click', () => {
+        pgm_switchPersona(persona.key);
+        pgm_closeQuickPopup();
+        setTimeout(() => pgm_updateQuickBtnAvatar(), 300);
+    });
+    avatarDiv.addEventListener('contextmenu', (e) => pgm_showContextMenu(e, persona.key));
+
+    return avatarDiv;
+}
+
+// ========== 刷新 ==========
+
+function pgm_refreshAllViews() {
+    const panel = pgm_findPersonaPanel();
+    if (panel) { panel.dataset.pgmEnhanced = 'false'; pgm_enhancePanel(); }
+
+    const popup = document.getElementById('pgm-quick-popup');
+    if (popup?.classList.contains('visible')) {
+        const si = popup.querySelector('.pgm-quick-search');
+        pgm_renderQuickContent(popup, si?.value?.toLowerCase() || '');
+    }
+    pgm_updateQuickBtnAvatar();
+}
+
+// ========== 初始化 ==========
+
+function pgm_init() {
+    if (window._pgmInitialized) return;
+    window._pgmInitialized = true;
+
+    console.log('[PGM] Persona Group Manager 初始化...');
+
+    pgm_getSettings();
+    pgm_initPanelEnhancement();
+    pgm_initQuickPopup();
+
+    try {
+        const ctx = pgm_getContext();
+        const eventSource = ctx.eventSource;
+        if (eventSource) {
+            for (const evt of ['persona_updated', 'PERSONA_UPDATED', 'settings_updated']) {
+                try { eventSource.on(evt, () => setTimeout(pgm_refreshAllViews, 200)); } catch (e) { /* ignore */ }
+            }
+        }
+    } catch (e) { console.warn('[PGM] 事件监听注册失败:', e); }
+
+    console.log('[PGM] Persona Group Manager 初始化完成！');
+}
+
+// ST 扩展标准启动方式
+jQuery(async () => {
+    // 等待 ST 完全加载
+    const waitForReady = setInterval(() => {
+        try {
+            const ctx = pgm_getContext();
+            if (ctx && document.getElementById('send_form')) {
+                clearInterval(waitForReady);
+                pgm_init();
+            }
+        } catch (e) { /* ST 还没准备好 */ }
+    }, 500);
+
+    // 最长等 15 秒
+    setTimeout(() => {
+        clearInterval(waitForReady);
+        if (!window._pgmInitialized) {
+            console.warn('[PGM] 等待超时，强制初始化');
+            pgm_init();
+        }
+    }, 15000);
+});
     }
 
     /**
